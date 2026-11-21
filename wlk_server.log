@@ -1,0 +1,147 @@
+INFO:     Started server process [23516]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:58202 - "WebSocket /asr" [accepted]
+INFO:     connection open
+INFO:whisperlivekit.basic_server:WebSocket connection opened.
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.03s | + Silence of = 2.66s
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+WARNING:whisperlivekit.simul_whisper.align_att_base:[Loop Detection] Too many tokens (114) for 5.03s audio. Breaking.
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s | + Silence starting | last_end = 3.74 |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=1.88s | + Silence of = 2.47s | last_end = 3.74 |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s | + Silence starting | last_end = 8.82 |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=4.54s | + Silence of = 7.68s | last_end = 9.02 |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s | + Silence starting | last_end = 9.02 |
+WARNING:whisperlivekit.basic_server:Client has closed the connection.
+INFO:whisperlivekit.basic_server:Cleaning up WebSocket endpoint...
+INFO:whisperlivekit.basic_server:WebSocket results handler task was cancelled.
+INFO:whisperlivekit.audio_processor:Starting cleanup of AudioProcessor resources.
+INFO:whisperlivekit.audio_processor:ffmpeg_stdout_reader cancelled.
+INFO:whisperlivekit.audio_processor:FFmpeg stdout processing finished. Signaling downstream processors if needed.
+INFO:whisperlivekit.audio_processor:Watchdog task cancelled.
+INFO:whisperlivekit.audio_processor:All processing tasks cancelled or finished.
+INFO:whisperlivekit.audio_processor:FFmpeg manager stopped.
+INFO:whisperlivekit.audio_processor:AudioProcessor cleanup complete.
+INFO:whisperlivekit.basic_server:WebSocket endpoint cleaned up successfully.
+INFO:     Started server process [12100]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:60794 - "WebSocket /asr" [accepted]
+INFO:     connection open
+INFO:whisperlivekit.basic_server:WebSocket connection opened.
+WARNING:whisperlivekit.basic_server:Client has closed the connection.
+INFO:whisperlivekit.basic_server:Cleaning up WebSocket endpoint...
+INFO:whisperlivekit.basic_server:WebSocket results handler task was cancelled.
+INFO:whisperlivekit.audio_processor:Starting cleanup of AudioProcessor resources.
+INFO:whisperlivekit.audio_processor:ffmpeg_stdout_reader cancelled.
+INFO:whisperlivekit.audio_processor:FFmpeg stdout processing finished. Signaling downstream processors if needed.
+INFO:whisperlivekit.audio_processor:Watchdog task cancelled.
+INFO:whisperlivekit.audio_processor:All processing tasks cancelled or finished.
+INFO:     127.0.0.1:60796 - "WebSocket /asr" [accepted]
+INFO:     connection open
+INFO:whisperlivekit.basic_server:WebSocket connection opened.
+INFO:whisperlivekit.audio_processor:FFmpeg manager stopped.
+INFO:whisperlivekit.audio_processor:AudioProcessor cleanup complete.
+INFO:whisperlivekit.basic_server:WebSocket endpoint cleaned up successfully.
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.05s | + Silence of = 2.63s
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s | + Silence starting
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s | + Silence of = 1.09s
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s | + Silence starting | last_end = 3.04 |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s | + Silence of = 3.11s | last_end = 4.86 |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s | + Silence starting | last_end = 8.52 |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s | + Silence of = 2.66s | last_end = 8.9 |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s | + Silence starting | last_end = 13.74 |
+WARNING:whisperlivekit.basic_server:Client has closed the connection.
+INFO:whisperlivekit.basic_server:Cleaning up WebSocket endpoint...
+INFO:whisperlivekit.basic_server:WebSocket results handler task was cancelled.
+INFO:whisperlivekit.audio_processor:Starting cleanup of AudioProcessor resources.
+INFO:whisperlivekit.audio_processor:ffmpeg_stdout_reader cancelled.
+INFO:whisperlivekit.audio_processor:FFmpeg stdout processing finished. Signaling downstream processors if needed.
+INFO:whisperlivekit.audio_processor:Watchdog task cancelled.
+INFO:whisperlivekit.audio_processor:All processing tasks cancelled or finished.
+INFO:whisperlivekit.audio_processor:FFmpeg manager stopped.
+INFO:whisperlivekit.audio_processor:AudioProcessor cleanup complete.
+INFO:whisperlivekit.basic_server:WebSocket endpoint cleaned up successfully.
+INFO:     Started server process [20376]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:50862 - "WebSocket /asr" [accepted]
+INFO:     connection open
+INFO:whisperlivekit.basic_server:WebSocket connection opened.
+WARNING:whisperlivekit.basic_server:Client has closed the connection.
+INFO:whisperlivekit.basic_server:Cleaning up WebSocket endpoint...
+INFO:whisperlivekit.basic_server:WebSocket results handler task was cancelled.
+INFO:whisperlivekit.audio_processor:Starting cleanup of AudioProcessor resources.
+INFO:whisperlivekit.audio_processor:ffmpeg_stdout_reader cancelled.
+INFO:whisperlivekit.audio_processor:FFmpeg stdout processing finished. Signaling downstream processors if needed.
+INFO:whisperlivekit.audio_processor:Watchdog task cancelled.
+INFO:whisperlivekit.audio_processor:All processing tasks cancelled or finished.
+INFO:whisperlivekit.audio_processor:FFmpeg manager stopped.
+INFO:whisperlivekit.audio_processor:AudioProcessor cleanup complete.
+INFO:whisperlivekit.basic_server:WebSocket endpoint cleaned up successfully.
+INFO:     Started server process [7612]
+INFO:     Waiting for application startup.
+ERROR:    Traceback (most recent call last):
+  File "C:\Users\junse\OneDrive\Desktop\VSC\¼Ó»è¿©Áàv1\.venv\Lib\site-packages\whisperlivekit\diarization\sortformer_backend.py", line 16, in <module>
+    from nemo.collections.asr.models import SortformerEncLabelModel
+ModuleNotFoundError: No module named 'nemo'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\junse\OneDrive\Desktop\VSC\¼Ó»è¿©Áàv1\.venv\Lib\site-packages\starlette\routing.py", line 661, in lifespan
+    async with self.lifespan_context(app) as maybe_state:
+               ~~~~~~~~~~~~~~~~~~~~~^^^^^
+  File "C:\Users\junse\AppData\Local\Python\pythoncore-3.14-64\Lib\contextlib.py", line 214, in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\junse\OneDrive\Desktop\VSC\¼Ó»è¿©Áàv1\.venv\Lib\site-packages\whisperlivekit\basic_server.py", line 23, in lifespan
+    transcription_engine = TranscriptionEngine(config=config)
+  File "C:\Users\junse\OneDrive\Desktop\VSC\¼Ó»è¿©Áàv1\.venv\Lib\site-packages\whisperlivekit\core.py", line 35, in __init__
+    self._do_init(config, **kwargs)
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+  File "C:\Users\junse\OneDrive\Desktop\VSC\¼Ó»è¿©Áàv1\.venv\Lib\site-packages\whisperlivekit\core.py", line 157, in _do_init
+    from whisperlivekit.diarization.sortformer_backend import SortformerDiarization
+  File "C:\Users\junse\OneDrive\Desktop\VSC\¼Ó»è¿©Áàv1\.venv\Lib\site-packages\whisperlivekit\diarization\sortformer_backend.py", line 19, in <module>
+    raise SystemExit("""Please use `pip install "git+https://github.com/NVIDIA/NeMo.git@main#egg=nemo_toolkit[asr]"` to use the Sortformer diarization""")
+SystemExit: Please use `pip install "git+https://github.com/NVIDIA/NeMo.git@main#egg=nemo_toolkit[asr]"` to use the Sortformer diarization
+
+ERROR:    Application startup failed. Exiting.
+SimulStreaming will use Faster Whisper for the encoder.
+INFO:     Started server process [13052]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started server process [22572]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
