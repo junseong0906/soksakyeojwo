@@ -28,7 +28,21 @@ from PySide6.QtWidgets import (
 from ui.subtitle_box import SubtitleBox
 from workers.asr_client_worker import asr_client_process_main
 from workers.recorder_worker import recorder_process_main
-
+from PySide6.QtWidgets import (
+    QComboBox,
+    QDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QTextBrowser,
+    QVBoxLayout,
+    QWidget,
+)
 
 SAMPLE_STREAM: list[tuple[str, bool]] = [
     ("오늘은 음성 신호 처리와 실시간", False),
@@ -41,8 +55,93 @@ SAMPLE_STREAM: list[tuple[str, bool]] = [
     ("자막이 잠시 멈추거나 지연되더라도 녹음은 계속 이어지도록 설계합니다.", True),
 ]
 
+class SpeakerLabeler:
+    def __init__(self) -> None:
+        self._speaker_order: dict[str, int] = {}
+        self._custom_names: dict[str, str] = {}
+
+    def set_custom_name(self, speaker_id: str, display_name: str) -> None:
+        sid = speaker_id.strip()
+        if not sid:
+            return
+        name = display_name.strip()
+        if name:
+            self._custom_names[sid] = name
+        else:
+            self._custom_names.pop(sid, None)
+
+    def get_custom_name(self, speaker_id: str) -> str:
+        return self._custom_names.get(speaker_id.strip(), "")
+
+    def apply(self, ev: dict) -> dict:
+        sid = str(ev.get("speaker_id") or "").strip()
+        if not sid:
+            return {**ev, "speaker_label": ""}
+        if sid in self._custom_names:
+            label = self._custom_names[sid]
+        else:
+            if sid not in self._speaker_order:
+                self._speaker_order[sid] = len(self._speaker_order) + 1
+            label = f"화자 {self._speaker_order[sid]}"
+        return {**ev, "speaker_label": label}
+
+
+class SpeakerLabelDialog(QDialog):
+    def __init__(self, labeler: SpeakerLabeler, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.labeler = labeler
+        self.setWindowTitle("화자 이름 설정")
+        self.setMinimumWidth(340)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.speaker_id_input = QLineEdit()
+        self.speaker_id_input.setPlaceholderText("예: spk_1 또는 1")
+        self.speaker_id_input.textChanged.connect(self._on_id_changed)
+
+        self.display_name_input = QLineEdit()
+        self.display_name_input.setPlaceholderText("비워두면 기본 라벨 사용")
+
+        self.current_map_label = QLabel("현재 지정됨: 없음")
+
+        form.addRow("화자 ID", self.speaker_id_input)
+        form.addRow("표시 이름", self.display_name_input)
+        form.addRow("상태", self.current_map_label)
+        layout.addLayout(form)
+
+        btn_row = QHBoxLayout()
+        apply_btn = QPushButton("적용")
+        apply_btn.clicked.connect(self._apply)
+        close_btn = QPushButton("닫기")
+        close_btn.clicked.connect(self.reject)
+        btn_row.addStretch(1)
+        btn_row.addWidget(apply_btn)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+    def _on_id_changed(self, text: str) -> None:
+        sid = text.strip()
+        existing = self.labeler.get_custom_name(sid) if sid else ""
+        self.display_name_input.setText(existing)
+        self.current_map_label.setText(
+            f"현재 지정됨: {sid} → {existing}" if (sid and existing) else "현재 지정됨: 없음"
+        )
+
+    def _apply(self) -> None:
+        sid = self.speaker_id_input.text().strip()
+        if not sid:
+            return
+        name = self.display_name_input.text().strip()
+        self.labeler.set_custom_name(sid, name)
+        self._on_id_changed(sid)
 
 class MainWindow(QMainWindow):
+
+    def open_speaker_label_dialog(self) -> None:
+        dlg = SpeakerLabelDialog(self.speaker_labeler, self)
+        dlg.exec()
+    
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("속삭여줘v1")
@@ -75,6 +174,9 @@ class MainWindow(QMainWindow):
         self.prev_text: str = ""
         self.current_text: str = "WLK 서버로 실시간 자막을 시작하거나 「테스트 자막 재생」을 눌러보세요"
         self.current_is_final: bool = True
+        self.speaker_labeler = SpeakerLabeler()
+        self.current_speaker_label: str = ""
+        self.prev_speaker_label: str = ""
 
         self._build_ui()
         self._init_shortcuts_and_timers()
@@ -349,6 +451,8 @@ class MainWindow(QMainWindow):
 
         self.wlk_url_input = QLineEdit("ws://127.0.0.1:8000/asr")
         self.wlk_url_input.setObjectName("urlInput")
+        self.speaker_btn = QPushButton("화자 이름 설정")
+        self.speaker_btn.clicked.connect(self.open_speaker_label_dialog)
 
         self.focus_hint_label = QLabel("집중 화면 (Esc 또는 버튼으로 해제)")
         self.focus_hint_label.setObjectName("infoText")
@@ -364,9 +468,9 @@ class MainWindow(QMainWindow):
         mic_layout.addSpacing(6)
         mic_layout.addWidget(url_title)
         mic_layout.addWidget(self.wlk_url_input)
+        mic_layout.addWidget(self.speaker_btn)
         mic_layout.addStretch(1)
         mic_layout.addWidget(self.focus_hint_label)
-        main_layout.addWidget(self.mic_bar)
 
         # 3. 상태/장애 테스트 바
         self.sim_bar = QWidget()
@@ -617,8 +721,10 @@ class MainWindow(QMainWindow):
                 text = str(ev.get("text", "")).strip()
                 is_final = bool(ev.get("is_final", False))
                 if text:
-                    self._apply_incoming_subtitle(text, is_final)
-
+                    labeled = self.speaker_labeler.apply(ev)
+                    speaker_label = str(labeled.get("speaker_label", ""))
+                    self._apply_incoming_subtitle(text, is_final, speaker_label)
+            
             elif etype == "heartbeat":
                 if self.is_live_asr_active and self.sub_mode == "대기 중":
                     self.sub_status_label.setText("자막: 연결 유지 중")
@@ -634,20 +740,24 @@ class MainWindow(QMainWindow):
                     self.sub_mode = "대기 중"
                     self.sub_status_label.setText("자막: 연결 오류")
 
-    def _apply_incoming_subtitle(self, text: str, is_final: bool) -> None:
-        # 확정 문장이 새로 들어오면 이전 확정 문장을 기록/이전 박스로 넘김
+    def _apply_incoming_subtitle(
+        self, text: str, is_final: bool, speaker_label: str = ""
+    ) -> None:
+        formatted = f"[{speaker_label}] {text}" if speaker_label else text
+
         if is_final:
             if (
                 self.current_is_final
                 and self.current_text
-                and self.current_text != text
+                and self.current_text != formatted
                 and not self.current_text.startswith("WLK 서버로")
             ):
                 self.prev_text = self.current_text
                 self.append_history_line(self.current_text)
 
-        self.current_text = text
+        self.current_text = formatted
         self.current_is_final = is_final
+        self.current_speaker_label = speaker_label
         self.sub_mode = "수신 중"
         self.sub_status_label.setText("자막: 실시간 수신 중")
         self.critical_alert_banner.hide()
