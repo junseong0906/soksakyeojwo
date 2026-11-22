@@ -207,3 +207,46 @@ INFO:whisperlivekit.audio_processor:All processing tasks cancelled or finished.
 INFO:whisperlivekit.audio_processor:FFmpeg manager stopped.
 INFO:whisperlivekit.audio_processor:AudioProcessor cleanup complete.
 INFO:whisperlivekit.basic_server:WebSocket endpoint cleaned up successfully.
+INFO:     Started server process [18788]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:64266 - "WebSocket /asr" [accepted]
+INFO:     connection open
+INFO:whisperlivekit.basic_server:WebSocket connection opened.
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.06s | + Silence of = 1.67s
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+WARNING:whisperlivekit.simul_whisper.align_att_base:[UTF-8 Filter] Skipping: ' ÀÚ\ufffd'
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.11s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.51s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.57s | + Silence starting | last_end = 3.7 |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=6.30s | + Silence of = 8.45s | last_end = 4.06 |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |
+WARNING:whisperlivekit.basic_server:Client has closed the connection.
+INFO:whisperlivekit.basic_server:Cleaning up WebSocket endpoint...
+INFO:whisperlivekit.basic_server:WebSocket results handler task was cancelled.
+INFO:whisperlivekit.audio_processor:Starting cleanup of AudioProcessor resources.
+INFO:whisperlivekit.audio_processor:ffmpeg_stdout_reader cancelled.
+INFO:whisperlivekit.audio_processor:FFmpeg stdout processing finished. Signaling downstream processors if needed.
+INFO:whisperlivekit.audio_processor:Watchdog task cancelled.
+INFO:whisperlivekit.audio_processor:All processing tasks cancelled or finished.
+INFO:whisperlivekit.audio_processor:FFmpeg manager stopped.
+INFO:whisperlivekit.audio_processor:AudioProcessor cleanup complete.
+INFO:whisperlivekit.basic_server:WebSocket endpoint cleaned up successfully.
+INFO:     Started server process [20300]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started server process [10740]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started server process [1088]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)

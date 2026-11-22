@@ -13,6 +13,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QComboBox,
+    QDialog,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -28,21 +30,6 @@ from PySide6.QtWidgets import (
 from ui.subtitle_box import SubtitleBox
 from workers.asr_client_worker import asr_client_process_main
 from workers.recorder_worker import recorder_process_main
-from PySide6.QtWidgets import (
-    QComboBox,
-    QDialog,
-    QFormLayout,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QMainWindow,
-    QMessageBox,
-    QProgressBar,
-    QPushButton,
-    QTextBrowser,
-    QVBoxLayout,
-    QWidget,
-)
 
 SAMPLE_STREAM: list[tuple[str, bool]] = [
     ("오늘은 음성 신호 처리와 실시간", False),
@@ -54,6 +41,7 @@ SAMPLE_STREAM: list[tuple[str, bool]] = [
     ("자막이 잠시 멈추거나 지연되더라도", False),
     ("자막이 잠시 멈추거나 지연되더라도 녹음은 계속 이어지도록 설계합니다.", True),
 ]
+
 
 class SpeakerLabeler:
     def __init__(self) -> None:
@@ -136,12 +124,8 @@ class SpeakerLabelDialog(QDialog):
         self.labeler.set_custom_name(sid, name)
         self._on_id_changed(sid)
 
-class MainWindow(QMainWindow):
 
-    def open_speaker_label_dialog(self) -> None:
-        dlg = SpeakerLabelDialog(self.speaker_labeler, self)
-        dlg.exec()
-    
+class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("속삭여줘v1")
@@ -182,6 +166,10 @@ class MainWindow(QMainWindow):
         self._init_shortcuts_and_timers()
         self._start_workers()
         self.refresh_subtitles()
+
+    def open_speaker_label_dialog(self) -> None:
+        dlg = SpeakerLabelDialog(self.speaker_labeler, self)
+        dlg.exec()
 
     def _build_ui(self) -> None:
         self.setStyleSheet("""
@@ -451,6 +439,7 @@ class MainWindow(QMainWindow):
 
         self.wlk_url_input = QLineEdit("ws://127.0.0.1:8000/asr")
         self.wlk_url_input.setObjectName("urlInput")
+
         self.speaker_btn = QPushButton("화자 이름 설정")
         self.speaker_btn.clicked.connect(self.open_speaker_label_dialog)
 
@@ -471,6 +460,7 @@ class MainWindow(QMainWindow):
         mic_layout.addWidget(self.speaker_btn)
         mic_layout.addStretch(1)
         mic_layout.addWidget(self.focus_hint_label)
+        main_layout.addWidget(self.mic_bar)
 
         # 3. 상태/장애 테스트 바
         self.sim_bar = QWidget()
@@ -724,7 +714,7 @@ class MainWindow(QMainWindow):
                     labeled = self.speaker_labeler.apply(ev)
                     speaker_label = str(labeled.get("speaker_label", ""))
                     self._apply_incoming_subtitle(text, is_final, speaker_label)
-            
+
             elif etype == "heartbeat":
                 if self.is_live_asr_active and self.sub_mode == "대기 중":
                     self.sub_status_label.setText("자막: 연결 유지 중")
@@ -1073,12 +1063,6 @@ class MainWindow(QMainWindow):
         if self.font_size > self.min_font_size:
             self.font_size -= 4
             self.refresh_subtitles()
-
-    def toggle_recording(self) -> None:
-        if not self.is_recording:
-            self.rec_cmd_queue.put({"type": "start_recording"})
-        else:
-            self.rec_cmd_queue.put({"type": "stop_recording"})
 
     def toggle_sample_subtitles(self) -> None:
         if self.is_live_asr_active:
