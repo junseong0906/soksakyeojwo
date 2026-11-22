@@ -15,6 +15,8 @@ from app_paths import atomic_json, data_dir
 from model_catalog import ModelSpec, WLK_VERSION
 from runtime_install import InstallCancelled, run_installer
 
+RUNTIME_REVISION = 2
+
 
 class Cancelled(Exception):
     pass
@@ -152,7 +154,7 @@ class RuntimeManager:
         try:
             stamp = json.loads((self.profile(model, diarization, device) / 'ready.json').read_text())
             accelerator = 'cuda' if device == 'cuda' else 'cpu'
-            return stamp == {'wlk': WLK_VERSION, 'device': accelerator, 'diarization': diarization, 'family': model.family} and self.python(model, diarization, device).exists()
+            return stamp == {'wlk': WLK_VERSION, 'device': accelerator, 'diarization': diarization, 'family': model.family, 'runtime': RUNTIME_REVISION} and self.python(model, diarization, device).exists()
         except (OSError, ValueError): return False
 
     @staticmethod
@@ -224,7 +226,7 @@ class RuntimeManager:
         torch_packages = [f'torch=={torch_version}', f'torchaudio=={audio_version}']
         if diarization: torch_packages.append('torchvision==0.23.0')
         self.run([*pip, *torch_packages, '--index-url', index], progress, cancel, env, '[2/5] ' + ('NVIDIA CUDA' if device == 'cuda' else 'CPU') + ' Torch 설치')
-        requirements = [package]
+        requirements = [package, 'truststore==0.10.5']
         if model.family != 'voxtral': requirements += ['huggingface-hub==0.36.0']
         if model.family == 'qwen': requirements += ['qwen3-asr-causal==0.1.0', 'qwen-asr==0.0.6']
         if diarization: requirements += ['numpy<2', 'pyannote.audio<4', 'torchvision==0.23.0']
@@ -236,6 +238,6 @@ class RuntimeManager:
         if model.family == 'voxtral': probe += '; from transformers import VoxtralRealtimeForConditionalGeneration'
         if diarization: probe += '; import diart'
         self.run([str(python), '-c', probe], progress, cancel, env, '[5/5] 모델 로더·실행 장치 검사')
-        atomic_json(stamp, {'wlk': WLK_VERSION, 'device': 'cuda' if device == 'cuda' else 'cpu', 'diarization': diarization, 'family': model.family})
+        atomic_json(stamp, {'wlk': WLK_VERSION, 'device': 'cuda' if device == 'cuda' else 'cpu', 'diarization': diarization, 'family': model.family, 'runtime': RUNTIME_REVISION})
         progress(100, '실행환경 준비 완료 · 모델을 적용하면 엔진을 불러옵니다.')
         return str(python)

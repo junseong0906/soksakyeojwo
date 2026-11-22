@@ -14,9 +14,14 @@ from external_process import external_popen
 # device choice before its local import, without editing the installed package.
 SERVER_BOOTSTRAP = '''
 import os
+import sys
+import inspect
 import importlib.util
 from pathlib import Path
 handles = []
+if os.name == 'nt':
+    import truststore
+    truststore.inject_into_ssl()
 import huggingface_hub
 hub_download = huggingface_hub.hf_hub_download
 def compatible_download(*args, **kwargs):
@@ -45,6 +50,51 @@ class SelectedDeviceModel(original):
         kwargs['compute_type'] = 'float16' if device == 'cuda' else 'int8'
         super().__init__(*args, **kwargs)
 faster_whisper.WhisperModel = SelectedDeviceModel
+if '--diarization' in sys.argv:
+    import torch
+    from collections import defaultdict
+    from typing import Any
+    from torch.torch_version import TorchVersion
+    from pyannote.audio.core.task import Specifications, Problem, Resolution
+    # Embedded Python's inspect.stack scans modules without on-disk stdlib
+    # sources. SpeechBrain 1.1's lazy __file__ lookup then recurses into inspect.
+    try:
+        from speechbrain.utils.importutils import LazyModule
+    except ImportError:
+        pass
+    else:
+        original_lazy_getattr = LazyModule.__getattr__
+        def compatible_lazy_getattr(self, name):
+            if name == '__file__':
+                loaded = self.__dict__.get('lazy_module')
+                if loaded is None: raise AttributeError(name)
+                return getattr(loaded, name)
+            return original_lazy_getattr(self, name)
+        LazyModule.__getattr__ = compatible_lazy_getattr
+    from pyannote.audio.core.model import Introspection
+    from omegaconf import DictConfig, ListConfig
+    from omegaconf.base import ContainerMetadata, Metadata
+    from omegaconf.nodes import AnyNode
+    from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+    checkpoint_metadata = [TorchVersion, Specifications, Problem, Resolution, Introspection,
+                           DictConfig, ListConfig, ContainerMetadata, Metadata, AnyNode,
+                           EarlyStopping, ModelCheckpoint, defaultdict, int, list, dict, Any]
+    diart_backend = importlib.import_module('whisperlivekit.diarization.diart_backend')
+    OriginalDiart = diart_backend.DiartDiarization
+    parameters = inspect.signature(OriginalDiart).parameters
+    class CompatibleDiart(OriginalDiart):
+        def __init__(self, *args, **kwargs):
+            # WLK 0.2.28 core passes *_model; its Diart class expects *_model_name.
+            for caller, constructor in (('segmentation_model', 'segmentation_model_name'),
+                                        ('embedding_model', 'embedding_model_name')):
+                if caller in kwargs and caller not in parameters and constructor in parameters:
+                    value = kwargs.pop(caller)
+                    if value is not None: kwargs.setdefault(constructor, value)
+            # Official pyannote checkpoints contain these metadata types.
+            # Keep Torch's restricted loader; scope the allowlist to this load.
+            with torch.serialization.safe_globals(checkpoint_metadata):
+                super().__init__(*args, **kwargs)
+    diart_backend.DiartDiarization = CompatibleDiart
 from whisperlivekit.basic_server import main
 main()
 '''
@@ -95,6 +145,7 @@ class WlkServerManager:
                    '--host', '127.0.0.1', '--port', str(self.port), *model.arguments(Path(model_path), diarization, device)]
         env = {**os.environ, 'PYTHONUTF8': '1', 'PYTHONUNBUFFERED': '1',
                'HF_HOME': str(data_dir() / 'hf-cache'), 'HF_HUB_DISABLE_XET': '1',
+               'PYANNOTE_CACHE': str(data_dir() / 'hf-cache/hub'),
                'SOKSAK_DEVICE': 'cuda' if device == 'cuda' else 'cpu'}
         if device != 'cuda': env['CUDA_VISIBLE_DEVICES'] = ''
         if token: env['HF_TOKEN'] = token

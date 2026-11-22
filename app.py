@@ -66,12 +66,13 @@ def main():
                     from model_catalog import MODELS
                     selected = get_model(sys.argv[sys.argv.index('--smoke-model') + 1]) if '--smoke-model' in sys.argv else get_model('whisper-turbo')
                     selected_device = sys.argv[sys.argv.index('--smoke-device') + 1] if '--smoke-device' in sys.argv else 'cuda'
+                    selected_diarization = '--smoke-diarization' in sys.argv
                     dialog = window.model_dialog
                     dialog.model_checks[next(i for i, item in enumerate(MODELS) if item.id == selected.id)].click()
-                    dialog.diarization.setChecked(False)
+                    dialog.diarization.setChecked(selected_diarization)
                     dialog.device.setCurrentIndex(dialog.device.findData(selected_device))
                     start = time.monotonic()
-                    result.update(model=selected.id, device=selected_device, frozen=bool(getattr(sys, 'frozen', False)))
+                    result.update(model=selected.id, device=selected_device, diarization=selected_diarization, frozen=bool(getattr(sys, 'frozen', False)))
                     def record_progress(percent, message):
                         with report.with_suffix('.progress.jsonl').open('a', encoding='utf-8') as stream:
                             stream.write(json.dumps({'seconds': round(time.monotonic() - start, 1), 'percent': percent, 'message': message}, ensure_ascii=False) + '\n')
@@ -79,7 +80,7 @@ def main():
                     controller.progress.connect(record_progress)
                     def finish_apply():
                         if controller.busy: return
-                        result['apply_ok'] = controller.active_id == selected.id and controller.runtimes.ready(selected, False, selected_device)
+                        result['apply_ok'] = controller.active_id == selected.id and controller.runtimes.ready(selected, selected_diarization, selected_device)
                         result['status'] = controller.status
                         result['seconds'] = round(time.monotonic() - start, 1)
                         result['ok'] = result['ok'] and result['apply_ok']
