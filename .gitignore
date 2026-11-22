@@ -1,5 +1,7 @@
-
-assets/ffmpeg/ffmpeg.exe
-
-assets/ffmpeg/ffmpeg.exe
 .venv/
+data/
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+dist/

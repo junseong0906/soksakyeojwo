@@ -1,3 +1,4 @@
+import html
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QTextOption
 from PySide6.QtWidgets import QTextBrowser, QWidget
@@ -68,7 +69,7 @@ class SubtitleBox(QTextBrowser):
         self.setFont(font)
         self.document().setDefaultFont(font)
 
-        self.setHtml(f'<div align="center">{text}</div>')
+        self.setHtml(f'<div align="center">{html.escape(text)}</div>')
         self.sync_height()
 
     def sync_height(self) -> None:
