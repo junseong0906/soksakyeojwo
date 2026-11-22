@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest>=8,<10
+websockets>=14,<17
+pyinstaller==6.22.3
