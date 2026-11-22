@@ -6,3 +6,4 @@ soxr>=0.5,<2
 websocket-client==1.9.2
 huggingface-hub==0.36.0
 truststore==0.10.5
+psutil==7.0.0

@@ -227,7 +227,7 @@ class ModelDialog(QDialog):
             bar = self.row_progress[row]
             bar.setRange(0, 0 if percent < 0 else 100)
             if percent >= 0: bar.setValue(percent)
-        self.status.setText(prefix + message.split('\n')[0][:240])
+        self.status.setText(prefix + '\n'.join(message.splitlines()[:2])[:440])
         self.progress.setVisible(controller.busy and controller.task_kind != 'download')
         self.progress.setRange(0, 0 if percent < 0 else 100)
         if percent >= 0: self.progress.setValue(percent)

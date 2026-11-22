@@ -60,6 +60,36 @@ def main():
                 result['tls_verification'] = context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
                 result['ok'] = result['worker'] == 'worker-ready' and result['models'] == 7
                 window.model_dialog.grab().save(str(report.with_suffix('.png')))
+                if '--apply-smoke' in sys.argv:
+                    import json
+                    import time
+                    from model_catalog import MODELS
+                    selected = get_model(sys.argv[sys.argv.index('--smoke-model') + 1]) if '--smoke-model' in sys.argv else get_model('whisper-turbo')
+                    selected_device = sys.argv[sys.argv.index('--smoke-device') + 1] if '--smoke-device' in sys.argv else 'cuda'
+                    dialog = window.model_dialog
+                    dialog.model_checks[next(i for i, item in enumerate(MODELS) if item.id == selected.id)].click()
+                    dialog.diarization.setChecked(False)
+                    dialog.device.setCurrentIndex(dialog.device.findData(selected_device))
+                    start = time.monotonic()
+                    result.update(model=selected.id, device=selected_device, frozen=bool(getattr(sys, 'frozen', False)))
+                    def record_progress(percent, message):
+                        with report.with_suffix('.progress.jsonl').open('a', encoding='utf-8') as stream:
+                            stream.write(json.dumps({'seconds': round(time.monotonic() - start, 1), 'percent': percent, 'message': message}, ensure_ascii=False) + '\n')
+                        if '[2/5]' in message: dialog.grab().save(str(report.with_name(report.stem + '-install.png')))
+                    controller.progress.connect(record_progress)
+                    def finish_apply():
+                        if controller.busy: return
+                        result['apply_ok'] = controller.active_id == selected.id and controller.runtimes.ready(selected, False, selected_device)
+                        result['status'] = controller.status
+                        result['seconds'] = round(time.monotonic() - start, 1)
+                        result['ok'] = result['ok'] and result['apply_ok']
+                        dialog.grab().save(str(report.with_suffix('.png')))
+                        atomic_json(report, result)
+                        app.quit()
+                    controller.changed.connect(finish_apply)
+                    dialog.apply.click()
+                    if not controller.busy: finish_apply()
+                    return
                 if '--download-smoke' in sys.argv:
                     import traceback
                     def finish_download():

@@ -13,6 +13,7 @@ import zipfile
 
 from app_paths import atomic_json, data_dir
 from model_catalog import ModelSpec, WLK_VERSION
+from runtime_install import InstallCancelled, run_installer
 
 
 class Cancelled(Exception):
@@ -155,35 +156,25 @@ class RuntimeManager:
         except (OSError, ValueError): return False
 
     @staticmethod
-    def run(command, progress, cancel, env=None):
-        check_cancel(cancel)
-        lines = []
-        proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', creationflags=hidden_flags(), env=env)
-        def watch():
-            while proc.poll() is None:
-                if cancel.wait(.15):
-                    if os.name == 'nt':
-                        subprocess.run(['taskkill', '/PID', str(proc.pid), '/T', '/F'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=hidden_flags())
-                    else: proc.terminate()
-                    return
-        watcher = threading.Thread(target=watch, daemon=True)
-        watcher.start()
-        for line in proc.stdout:
-            lines.append(line.rstrip())
-            if len(lines) > 30: lines.pop(0)
-            # Keep installer details for error diagnostics, with plain progress in the UI.
-            message = line.strip()
-            if message.startswith(('Downloading', 'Using cached')):
-                progress(-1, '실행에 필요한 파일을 준비하는 중…')
-            elif message.startswith('Installing collected'):
-                progress(-1, '앱 전용 실행환경에 필요한 구성 요소를 설치하는 중…')
-            elif message.startswith('No broken requirements'):
-                progress(-1, '실행환경 호환성 검사 완료 · 모델 로더를 확인하는 중…')
-            elif message.startswith('CUDA:'):
-                progress(-1, '선택한 실행 장치와 모델 로더를 확인하는 중…')
-        code = proc.wait()
-        check_cancel(cancel)
-        if code: raise RuntimeError('실행환경 준비 실패. 네트워크·디스크 공간을 확인한 뒤 다시 시도해 주세요.\n' + '\n'.join(lines[-12:]))
+    def run(command, progress, cancel, env=None, stage='실행환경 준비'):
+        progress(-1, stage + ' · 시작 중…')
+        try:
+            run_installer(command, progress, cancel, data_dir() / 'logs/runtime-install.log', env=env, stage=stage)
+        except InstallCancelled as exc:
+            raise Cancelled(str(exc)) from exc
+
+    def _ensure_pip(self, python, target, progress, cancel):
+        # A cancelled get-pip leaves python.exe present but no usable pip.
+        probe = 'import importlib.util; assert importlib.util.find_spec("pip") is not None, "pip missing"'
+        try:
+            self.run([str(python), '-c', probe], progress, cancel, stage='[1/5] Python 설치 상태 확인')
+            return
+        except Cancelled: raise
+        except RuntimeError: pass
+        get_pip = target / 'get-pip.py'
+        with urllib.request.urlopen('https://bootstrap.pypa.io/get-pip.py', timeout=30) as response:
+            get_pip.write_bytes(response.read())
+        self.run([str(python), str(get_pip), '--no-input', '--no-warn-script-location'], progress, cancel, stage='[1/5] 패키지 설치 도구 복구')
 
     def _bootstrap(self, target, progress, cancel):
         # Official portable Python: no administrator access or system Python modification.
@@ -198,14 +189,11 @@ class RuntimeManager:
         with zipfile.ZipFile(archive) as bundle: bundle.extractall(target)
         archive.unlink()
         (target / 'python312._pth').write_text('python312.zip\n.\nLib\nLib/site-packages\nimport site\n')
-        get_pip = target / 'get-pip.py'
-        with urllib.request.urlopen('https://bootstrap.pypa.io/get-pip.py', timeout=30) as response:
-            get_pip.write_bytes(response.read())
-        self.run([str(target / 'python.exe'), str(get_pip)], progress, cancel)
 
     def prepare(self, model, diarization, device, progress, cancel):
         if self.ready(model, diarization, device): return str(self.python(model, diarization, device))
         target = self.profile(model, diarization, device)
+        target.mkdir(parents=True, exist_ok=True)
         stamp = target / 'ready.json'
         stamp.unlink(missing_ok=True)
         python = self.python(model, diarization, device)
@@ -214,36 +202,40 @@ class RuntimeManager:
             if not source and not getattr(sys, 'frozen', False) and sys.version_info[:2] in ((3, 11), (3, 12)):
                 source = sys.executable
             if source:
-                self.run([source, '-m', 'venv', str(target)], progress, cancel)
+                self.run([source, '-m', 'venv', str(target)], progress, cancel, stage='[1/5] 앱 전용 Python 생성')
             else: self._bootstrap(target, progress, cancel)
         python = self.python(model, diarization, device)
+        self._ensure_pip(python, target, progress, cancel)
         extras = []
         if model.family == 'qwen': extras.append('qwen3-streaming')
         if model.family == 'voxtral': extras.append('voxtral-hf')
         if diarization: extras.append('diarization-diart')
         package = 'whisperlivekit' + ('[' + ','.join(extras) + ']' if extras else '') + '==' + WLK_VERSION
-        env = {**os.environ, 'PYTHONUTF8': '1', 'PYTHONUNBUFFERED': '1', 'PIP_DISABLE_PIP_VERSION_CHECK': '1'}
+        env = {**os.environ, 'PYTHONUTF8': '1', 'PYTHONUNBUFFERED': '1', 'PIP_DISABLE_PIP_VERSION_CHECK': '1',
+               'PIP_NO_INPUT': '1', 'PIP_DEFAULT_TIMEOUT': '30', 'PIP_RETRIES': '3'}
         # Matching Torch/TorchAudio wheels are installed together. Diart requires <2.9.
         torch_version = '2.8.0'
         audio_version = torch_version
         index = 'https://download.pytorch.org/whl/cu128' if device == 'cuda' else 'https://download.pytorch.org/whl/cpu'
         progress(-1, '음성 인식 실행환경 준비 중 · 최초 설치에는 수 분이 걸릴 수 있습니다.')
-        self.run([str(python), '-m', 'pip', 'install', '--upgrade', 'pip'], progress, cancel, env)
+        pip = [str(python), '-m', 'pip', 'install', '--no-input', '--no-warn-script-location', '--prefer-binary', '--progress-bar', 'raw']
+        # Upgrade first: old pip versions do not support the raw progress stream.
+        self.run([str(python), '-m', 'pip', 'install', '--no-input', '--upgrade', 'pip'], progress, cancel, env, '[1/5] 패키지 설치 도구 준비')
         torch_packages = [f'torch=={torch_version}', f'torchaudio=={audio_version}']
         if diarization: torch_packages.append('torchvision==0.23.0')
-        self.run([str(python), '-m', 'pip', 'install', *torch_packages, '--index-url', index], progress, cancel, env)
+        self.run([*pip, *torch_packages, '--index-url', index], progress, cancel, env, '[2/5] ' + ('NVIDIA CUDA' if device == 'cuda' else 'CPU') + ' Torch 설치')
         requirements = [package]
         if model.family != 'voxtral': requirements += ['huggingface-hub==0.36.0']
         if model.family == 'qwen': requirements += ['qwen3-asr-causal==0.1.0', 'qwen-asr==0.0.6']
         if diarization: requirements += ['numpy<2', 'pyannote.audio<4', 'torchvision==0.23.0']
-        self.run([str(python), '-m', 'pip', 'install', *requirements], progress, cancel, env)
-        self.run([str(python), '-m', 'pip', 'check'], progress, cancel, env)
+        self.run([*pip, *requirements], progress, cancel, env, '[3/5] 음성 인식 구성요소 설치')
+        self.run([str(python), '-m', 'pip', 'check'], progress, cancel, env, '[4/5] 패키지 호환성 검사')
         probe = 'import whisperlivekit, torch; print("CUDA:", torch.cuda.is_available())'
         if device == 'cuda': probe += '; assert torch.cuda.is_available(), "NVIDIA GPU 또는 호환 드라이버를 찾지 못했습니다. CPU를 선택하거나 NVIDIA 드라이버를 확인해 주세요."'
         if model.family == 'qwen': probe += '; from whisperlivekit.qwen3_streaming import Qwen3StreamingASR'
         if model.family == 'voxtral': probe += '; from transformers import VoxtralRealtimeForConditionalGeneration'
         if diarization: probe += '; import diart'
-        self.run([str(python), '-c', probe], progress, cancel, env)
+        self.run([str(python), '-c', probe], progress, cancel, env, '[5/5] 모델 로더·실행 장치 검사')
         atomic_json(stamp, {'wlk': WLK_VERSION, 'device': 'cuda' if device == 'cuda' else 'cpu', 'diarization': diarization, 'family': model.family})
         progress(100, '실행환경 준비 완료 · 모델을 적용하면 엔진을 불러옵니다.')
         return str(python)

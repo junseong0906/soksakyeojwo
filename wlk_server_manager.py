@@ -8,6 +8,7 @@ import time
 import urllib.request
 from app_paths import data_dir
 from model_service import check_cancel, hidden_flags
+from external_process import external_popen
 
 # WLK 0.2.28's LocalAgreement loader hardcodes device='auto'. Apply the user's
 # device choice before its local import, without editing the installed package.
@@ -97,9 +98,10 @@ class WlkServerManager:
                'SOKSAK_DEVICE': 'cuda' if device == 'cuda' else 'cpu'}
         if device != 'cuda': env['CUDA_VISIBLE_DEVICES'] = ''
         if token: env['HF_TOKEN'] = token
-        self.proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=self.log, stderr=subprocess.STDOUT,
+        self.proc = external_popen(command, stdin=subprocess.DEVNULL, stdout=self.log, stderr=subprocess.STDOUT,
                                      creationflags=hidden_flags(), env=env)
-        deadline = time.monotonic() + 600
+        started = time.monotonic()
+        deadline = started + 600
         while time.monotonic() < deadline:
             check_cancel(cancel)
             if self.proc.poll() is not None:
@@ -113,7 +115,8 @@ class WlkServerManager:
                     progress(100, f'{model.name} 사용 중 · 한국어 · 화자 분리 ' + ('켜짐' if diarization else '꺼짐'))
                     return
             except (OSError, ValueError): pass
-            progress(-1, f'{model.name} 엔진을 불러오는 중… 최초 화자 모델 준비에는 시간이 걸릴 수 있습니다.')
+            elapsed = int(time.monotonic() - started)
+            progress(-1, f'{model.name} 엔진을 불러오는 중 · {elapsed // 60:02}:{elapsed % 60:02} 경과\nCUDA 초기화·모델 로딩 중입니다. 상세 로그: wlk_server.log')
             cancel.wait(.5)
         raise RuntimeError('엔진 준비 제한 시간(10분)을 초과했습니다. data/logs/wlk_server.log를 확인해 주세요.')
 
