@@ -29,11 +29,11 @@ class ModuleTests(unittest.TestCase):
         processor.reset()
         self.assertEqual(len(processor.process(msg)), 1)
 
-    def test_partial_is_not_deduplicated(self):
+    def test_identical_partial_snapshot_is_deduplicated(self):
         msg = json.dumps({"buffer_transcription": "인식 중"})
         processor = WlkMessageProcessor()
-        self.assertFalse(processor.process(msg)[0]["is_final"])
-        self.assertFalse(processor.process(msg)[0]["is_final"])
+        self.assertEqual(processor.process(msg)[0]['partial'], '인식 중')
+        self.assertEqual(processor.process(msg), [])
 
     def test_label_mapping(self):
         labeler = SpeakerLabeler()

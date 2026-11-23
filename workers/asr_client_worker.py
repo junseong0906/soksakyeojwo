@@ -1,383 +1,387 @@
 from __future__ import annotations
-
+from dataclasses import dataclass
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 from multiprocessing import Queue
-from pathlib import Path
-import shutil
-import subprocess
-import sys
+from queue import Empty
+import socket
 import threading
 import time
 import websocket
+from app_paths import data_dir
+from local_engine import LOCAL_HOST, LocalEngineEndpoint
+from runtime_install import redact
+from speaker_labeler import normalize_speaker_id
 
 
-def _resolve_ffmpeg_executable() -> str:
-    """패키징 환경(PyInstaller / 설치 폴더)에 동봉된 ffmpeg.exe를 우선 찾습니다."""
-    candidates: list[Path] = []
+logger = logging.getLogger(__name__)
+SOCKET_ERRORS = (OSError, websocket.WebSocketException)
+RECONNECT_DELAY = .6
+SOCKET_POLL_TIMEOUT = 3
+# WLK can wait 30 seconds for room in a processing queue. Give it time to
+# report an overload before the client abandons an unfinished WebSocket frame.
+AUDIO_WRITE_TIMEOUT = 35
 
-    if getattr(sys, "frozen", False):
-        exe_dir = Path(sys.executable).resolve().parent
-        meipass = Path(getattr(sys, "_MEIPASS", exe_dir)).resolve()
-        candidates.extend([
-            meipass / "ffmpeg" / "ffmpeg.exe",
-            meipass / "ffmpeg.exe",
-            exe_dir / "ffmpeg" / "ffmpeg.exe",
-            exe_dir / "ffmpeg.exe",
-        ])
-
-    project_root = Path(__file__).resolve().parent.parent
-    candidates.extend([
-        project_root / "assets" / "ffmpeg" / "ffmpeg.exe",
-        project_root / "ffmpeg" / "ffmpeg.exe",
-    ])
-
-    for path in candidates:
-        if path.is_file():
-            return str(path)
-
-    found = shutil.which("ffmpeg")
-    return found if found else "ffmpeg"
-
-
-def _time_to_ms(value: object) -> int | None:
-    """WLK seconds (or H:MM:SS text) -> milliseconds; unknown stays None."""
-    if value is None or value == "":
-        return None
+def _time_to_ms(value):
+    if value is None or value == '': return None
     try:
-        if isinstance(value, (int, float)):
-            return round(float(value) * 1000)
-        parts = str(value).split(":")
-        seconds = sum(float(part) * (60 ** i) for i, part in enumerate(reversed(parts)))
-        return round(seconds * 1000)
-    except (TypeError, ValueError):
-        return None
+        if isinstance(value, (int, float)): return round(value * 1000)
+        return round(sum(float(p) * 60 ** i for i, p in enumerate(reversed(str(value).split(':')))) * 1000)
+    except (ValueError, TypeError): return None
+
+def _line_event(item, is_final=True):
+    text = str(item.get('text') or '').strip()
+    if not text or str(item.get('speaker', '')) == '-2': return None
+    return {'type': 'subtitle', 'text': text, 'is_final': is_final,
+            'speaker_id': normalize_speaker_id(item.get('speaker', item.get('speaker_id'))),
+            'start_ms': _time_to_ms(item.get('start', item.get('start_time'))),
+            'end_ms': _time_to_ms(item.get('end', item.get('end_time')))}
+
+def buffer_text(value):
+    return str(value.get('text') or '') if isinstance(value, dict) else str(value or '')
 
 
-def _speaker_id(value: object) -> str | None:
-    if value is None or str(value).strip() in {"", "-2"}:
-        return None
-    raw = str(value).strip()
-    return raw if raw.startswith("spk_") else f"spk_{raw}"
+def _server_error(data):
+    if isinstance(data, dict) and (data.get('status') == 'error' or str(data.get('type', '')).lower() == 'error'):
+        return str(data.get('error') or data.get('message') or '서버 처리 오류')
+    return None
 
 
-def _line_event(item: dict[str, object], is_final: bool = True) -> dict[str, object] | None:
-    text = str(item.get("text", "")).strip()
-    if not text:
-        return None
-    speaker = _speaker_id(item.get("speaker", item.get("speaker_id")))
-    event: dict[str, object] = {
-        "type": "subtitle",
-        "text": text,
-        "is_final": is_final,
-        "speaker_id": speaker,
-        "start_ms": _time_to_ms(item.get("start", item.get("start_time"))),
-        "end_ms": _time_to_ms(item.get("end", item.get("end_time"))),
-    }
-    return event
-
-
-def _parse_server_message(raw_msg: str) -> list[dict[str, object]]:
-    """WLK JSON/text -> subtitle events. Confirmed lines retain speaker/time metadata."""
+def _parse_server_message(raw_msg):
     text = raw_msg.strip()
-    if not text:
-        return []
-    try:
-        data = json.loads(text)
-    except Exception:
-        if text.lower() in {"ping", "pong", "heartbeat"}:
-            return [{"type": "heartbeat"}]
-        return [{
-            "type": "subtitle",
-            "text": text,
-            "is_final": True,
-            "speaker_id": None,
-            "start_ms": None,
-            "end_ms": None,
-        }]
-
+    if not text: return []
+    try: data = json.loads(text)
+    except ValueError:
+        if text.lower() in ('ping', 'pong', 'heartbeat'): return [{'type': 'heartbeat'}]
+        return [_line_event({'text': text})]
     if isinstance(data, dict):
-        msg_type = str(data.get("type", data.get("status", ""))).lower()
-        if msg_type in {"heartbeat", "ping", "pong"}:
-            return [{"type": "heartbeat"}]
-        events: list[dict[str, object]] = []
-        lines = data.get("lines")
-        if isinstance(lines, list):
-            for item in lines:
-                if isinstance(item, dict):
-                    event = _line_event(item, True)
-                    if event and event.get("speaker_id") is not None:
-                        events.append(event)
-                    elif event:  # WLK speaker=-2 is silence; don't present it as a speaker.
-                        if str(item.get("speaker", "")) != "-2":
-                            events.append(event)
-        buf = data.get("buffer_transcription", "")
-        if isinstance(buf, dict):
-            partial = _line_event(buf, False)
-        else:
-            partial = _line_event({"text": buf}, False)
-        if partial:
-            events.append(partial)
-        if events:
-            return events
-        transcript = (
-            data.get("text")
-            or data.get("transcript")
-            or data.get("buffer")
-            or data.get("transcription")
-            or ""
-        )
-        segments = data.get("segments")
-        if not transcript and isinstance(segments, list):
-            transcript = " ".join(
-                str(s.get("text", "")).strip() for s in segments if isinstance(s, dict)
-            )
-        if str(transcript).strip():
-            events.append({
-                "type": "subtitle",
-                "text": str(transcript).strip(),
-                "is_final": bool(
-                    data.get("is_final", data.get("final", data.get("completed", False)))
-                ),
-                "speaker_id": None,
-                "start_ms": None,
-                "end_ms": None,
-            })
-        return events
-
+        kind = str(data.get('type', '')).lower()
+        if kind in ('config', 'ready_to_stop', 'heartbeat', 'ping', 'pong'):
+            return [{**data, 'type': 'heartbeat' if kind in ('ping', 'pong') else kind}]
+        if error := _server_error(data):
+            return [{'type': 'asr_error', 'message': error}]
+        if isinstance(data.get('lines'), list):
+            return [event for line in data['lines'] if isinstance(line, dict)
+                    if (event := _line_event(line))]
+        transcript = data.get('text') or data.get('transcript') or buffer_text(data.get('buffer_transcription'))
+        event = _line_event({'text': transcript}, bool(data.get('is_final', data.get('final', False))))
+        return [event] if event else []
     if isinstance(data, list):
-        result: list[dict[str, object]] = []
-        for item in data:
-            if isinstance(item, dict):
-                event = _line_event(item, bool(item.get("is_final", item.get("final", False))))
-                if event and str(item.get("speaker", "")) != "-2":
-                    result.append(event)
-        return result
-
+        return [event for line in data if isinstance(line, dict)
+                if (event := _line_event(line, bool(line.get('is_final', False))))]
     return []
 
-
 class WlkMessageProcessor:
-    """Handles WLK mode=full snapshots without emitting the same confirmed line repeatedly."""
-    def __init__(self) -> None:
-        self._seen: set[tuple[object, ...]] = set()
+    """Forward full-state snapshots as updates, never as append-only final sentences."""
+    def __init__(self): self.reset()
+    def reset(self): self.signature = None
+    def process(self, raw_msg):
+        try: data = json.loads(raw_msg)
+        except ValueError: return _parse_server_message(raw_msg)
+        # WLK includes empty lines and buffers even in an error response.
+        if error := _server_error(data):
+            return [{'type': 'asr_error', 'message': error}]
+        if isinstance(data, dict) and ('lines' in data or 'buffer_transcription' in data or 'buffer_diarization' in data):
+            lines = [event for item in (data.get('lines') or []) if isinstance(item, dict)
+                     if (event := _line_event(item))]
+            event = {'type': 'transcript_snapshot', 'lines': lines,
+                     'partial': buffer_text(data.get('buffer_transcription')),
+                     'diarization_buffer': buffer_text(data.get('buffer_diarization'))}
+            signature = json.dumps(event, ensure_ascii=False, sort_keys=True)
+            if signature == self.signature: return []
+            self.signature = signature
+            return [event]
+        return _parse_server_message(raw_msg)
 
-    def reset(self) -> None:
-        self._seen.clear()
-
-    def process(self, raw_msg: str) -> list[dict[str, object]]:
-        result: list[dict[str, object]] = []
-        for event in _parse_server_message(raw_msg):
-            if event.get("type") == "subtitle" and event.get("is_final"):
-                key = (
-                    event.get("speaker_id"),
-                    event.get("start_ms"),
-                    event.get("end_ms"),
-                    event.get("text"),
-                )
-                if key in self._seen:
-                    continue
-                self._seen.add(key)
-            result.append(event)
-        return result
+@dataclass(frozen=True)
+class StreamFailure:
+    message: str
+    recovery: str = ''
+    event_type: str = 'asr_error'
 
 
-def asr_client_process_main(cmd_queue: Queue, event_queue: Queue) -> None:
-    """별도 프로세스에서 실행되는 WLK(/asr) WebSocket 자막 클라이언트"""
-    server_url = "ws://127.0.0.1:8000/asr"
-    ws: websocket.WebSocket | None = None
-    ffmpeg_proc: subprocess.Popen[bytes] | None = None
-    stream_active = False
-    message_processor = WlkMessageProcessor()
+class AudioSocket(socket.socket):
+    def __init__(self, done, on_backpressure):
+        super().__init__(socket.AF_INET, socket.SOCK_STREAM)
+        self.done = done
+        self.on_backpressure = on_backpressure
+        self.streaming = False
 
-    def _ffmpeg_stdout_reader(proc: subprocess.Popen[bytes], get_ws) -> None:
-        """ffmpeg가 만든 WebM 청크를 읽어 WebSocket으로 송출합니다."""
+    def send(self, data, flags=0):
+        deadline = time.monotonic() + AUDIO_WRITE_TIMEOUT
+        while True:
+            try:
+                return super().send(data, flags)
+            except TimeoutError:
+                if not self.streaming or self.done.is_set() or time.monotonic() >= deadline:
+                    raise
+                # A timed-out send wrote no bytes in this call. websocket-client
+                # owns the current frame and has already accounted for partial writes.
+                self.on_backpressure()
+
+
+class PcmSession:
+    """Own one WebSocket and record its terminal result exactly once."""
+
+    def __init__(self, events, factory=None):
+        self.events = events
+        self.factory = factory or websocket.WebSocket
+        self.ws = None
+        self.ready = threading.Event()
+        self.receiver = None
+        self.processor = WlkMessageProcessor()
+        self.done = threading.Event()
+        self.draining = threading.Event()
+        self.send_delayed = threading.Event()
+        self.failure = None
+        self._result_lock = threading.Lock()
+
+    def open(self, endpoint: LocalEngineEndpoint, *, reconnecting=False):
+        self.ws = self.factory(enable_multithread=True)
+        direct = AudioSocket(self.done, self._send_waiting)
         try:
-            assert proc.stdout is not None
-            while True:
-                chunk = proc.stdout.read(4096)
-                if not chunk:
-                    break
-                cur_ws = get_ws()
-                if cur_ws is not None:
-                    try:
-                        cur_ws.send(chunk, opcode=websocket.ABNF.OPCODE_BINARY)
-                    except Exception:
-                        break
+            timeout = SOCKET_POLL_TIMEOUT if reconnecting else 10
+            self.ws.settimeout(timeout)
+            # A preconnected socket bypasses proxy discovery in websocket-client.
+            direct.settimeout(timeout)
+            direct.connect((LOCAL_HOST, endpoint.port))
+            direct.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self.ws.connect(endpoint.asr_url, socket=direct, header=endpoint.headers, redirect_limit=0)
+            if self.ws.getstatus() != 101:
+                raise RuntimeError('로컬 엔진이 WebSocket 연결을 승인하지 않았습니다.')
+            raw_config = self.ws.recv()
+            if not raw_config:
+                raise websocket.WebSocketConnectionClosedException('로컬 엔진이 연결을 종료했습니다.')
+            config = json.loads(raw_config)
+            if error := _server_error(config):
+                raise RuntimeError(error)
+            if not isinstance(config, dict) or config.get('type') != 'config' or not config.get('useAudioWorklet'):
+                raise RuntimeError('로컬 엔진이 PCM 입력을 지원하지 않습니다. 설정에서 모델을 다시 적용해 주세요.')
         except Exception:
-            pass
+            self.disconnect()
+            direct.close()
+            raise
+        self.ws.settimeout(SOCKET_POLL_TIMEOUT)
+        direct.streaming = True
+        logger.info('Subtitle stream %s', 'reconnected' if reconnecting else 'opened')
+        self.events.put({'type': 'stream_reopened' if reconnecting else 'stream_opened'})
+        self.receiver = threading.Thread(target=self._receive, args=(self.ws,), daemon=True)
+        self.receiver.start()
 
-    def _start_ffmpeg() -> subprocess.Popen[bytes] | None:
+    def _finish(self, failure=None):
+        with self._result_lock:
+            if self.done.is_set():
+                return
+            self.failure = failure
+            if failure is None:
+                self.events.put({'type': 'transcript_finalized'})
+                self.ready.set()
+            else:
+                logger.warning('%s', redact(failure.message))
+            self.done.set()
+
+    def _receive(self, ws):
         try:
-            ffmpeg_bin = _resolve_ffmpeg_executable()
-            creationflags = (
-                subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
-            )
-            proc = subprocess.Popen(
-                [
-                    ffmpeg_bin,
-                    "-loglevel",
-                    "error",
-                    "-f",
-                    "s16le",
-                    "-ar",
-                    "16000",
-                    "-ac",
-                    "1",
-                    "-i",
-                    "pipe:0",
-                    "-c:a",
-                    "libopus",
-                    "-b:a",
-                    "32k",
-                    "-f",
-                    "webm",
-                    "pipe:1",
-                ],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                creationflags=creationflags,
-            )
-            reader = threading.Thread(
-                target=_ffmpeg_stdout_reader,
-                args=(proc, lambda: ws if stream_active else None),
-                daemon=True,
-            )
-            reader.start()
-            return proc
-        except FileNotFoundError:
-            event_queue.put({
-                "type": "asr_error",
-                "message": "ffmpeg를 찾을 수 없습니다. ffmpeg 설치 후 다시 시도해 주세요.",
-            })
-            return None
-        except Exception as exc:
-            event_queue.put({"type": "asr_error", "message": f"ffmpeg 시작 실패: {exc}"})
-            return None
-
-    def close_stream_gracefully() -> None:
-        nonlocal ws, ffmpeg_proc, stream_active
-        stream_active = False
-
-        if ffmpeg_proc is not None:
-            try:
-                if ffmpeg_proc.stdin:
-                    ffmpeg_proc.stdin.close()
-            except Exception:
-                pass
-            time.sleep(0.15)
-            try:
-                ffmpeg_proc.terminate()
-                ffmpeg_proc.wait(timeout=1.5)
-            except Exception:
+            while not self.done.is_set():
                 try:
-                    ffmpeg_proc.kill()
-                except Exception:
-                    pass
-            ffmpeg_proc = None
+                    opcode, raw = ws.recv_data()
+                except websocket.WebSocketTimeoutException:
+                    continue
+                if opcode == websocket.ABNF.OPCODE_CLOSE:
+                    code = int.from_bytes(raw[:2], 'big') if len(raw) >= 2 else None
+                    reason = raw[2:].decode('utf-8', errors='replace')
+                    details = f'{code} {reason}'.strip() if code else '종료 코드 없음'
+                    recovery = 'reconnect' if code in (None, 1000, 1001, 1006, 1011, 1012, 1013) else ''
+                    self._finish(StreamFailure(f'자막 서버 연결이 일찍 종료되었습니다. ({details})',
+                                               recovery=recovery))
+                    return
+                if self.done.is_set():
+                    return
+                if isinstance(raw, bytes):
+                    raw = raw.decode('utf-8')
+                for event in self.processor.process(raw):
+                    if event['type'] == 'ready_to_stop':
+                        if self.draining.is_set():
+                            self._finish()
+                        else:
+                            self._finish(StreamFailure('로컬 엔진이 자막 처리를 일찍 끝냈습니다.', recovery='reconnect'))
+                        return
+                    if event['type'] == 'asr_error':
+                        message = event['message']
+                        recover = message.startswith(('Transcription backlog did not clear', 'Diarization backlog did not clear'))
+                        self._finish(StreamFailure(message, recovery='restart' if recover else ''))
+                        return
+                    self.events.put(event)
+        except SOCKET_ERRORS as exc:
+            self._finish(StreamFailure(f'자막 수신 연결이 끊겼습니다. ({exc})', recovery='reconnect'))
+        except Exception as exc:
+            self._finish(StreamFailure(f'자막 수신 처리 오류: {exc}'))
 
+    def send(self, pcm):
+        if pcm:
+            self._send(pcm)
+
+    def _send_waiting(self):
+        if self.send_delayed.is_set():
+            return
+        self.send_delayed.set()
+        logger.warning('Local engine is slow to receive PCM. Waiting on the same connection.')
+        if not self.draining.is_set():
+            self.events.put({'type': 'stream_delayed'})
+
+    def _send(self, payload):
+        if self.ws is None or self.done.is_set() or not self.ws.connected:
+            return
+        try:
+            self.ws.send_binary(payload)
+        except (TimeoutError, websocket.WebSocketTimeoutException) as exc:
+            self._finish(StreamFailure(f'로컬 엔진이 음성을 받지 못해 전송 시간이 초과됐습니다. ({exc})', recovery='restart'))
+        except SOCKET_ERRORS as exc:
+            self._finish(StreamFailure(f'자막 음성 전송 연결이 끊겼습니다. ({exc})', recovery='reconnect'))
+        else:
+            if self.send_delayed.is_set():
+                self.send_delayed.clear()
+                logger.info('PCM delivery resumed on the same connection.')
+                if not self.draining.is_set():
+                    self.events.put({'type': 'stream_delivery_resumed'})
+
+    def close(self, timeout=45):
+        if self.ws is None:
+            return
+        if not self.done.is_set():
+            self.draining.set()
+            self.events.put({'type': 'stream_draining'})
+            # The recorder enqueues all earlier PCM before its stop command.
+            self._send(b'')
+            if not self.done.wait(timeout):
+                warning = '마지막 자막 처리 완료를 확인하지 못했습니다. 로컬 녹음 파일을 확인해 주세요.'
+                self._finish(StreamFailure(warning, event_type='asr_warning'))
+        self.report_closed()
+
+    def disconnect(self):
+        with self._result_lock:
+            self.done.set()
+        ws, self.ws = self.ws, None
         if ws is not None:
             try:
-                ws.send(json.dumps({"type": "stop"}))
-            except Exception:
-                pass
-            time.sleep(0.15)
+                if self.ready.is_set():
+                    ws.close(timeout=.5)
+                else:
+                    ws.shutdown()
+            except SOCKET_ERRORS:
+                logger.debug('Socket already closed.', exc_info=True)
+        if self.receiver is not None:
+            self.receiver.join(timeout=1)
+
+    def report_closed(self, *, allow_recovery=False):
+        self.disconnect()
+        if self.failure:
+            self.events.put({'type': self.failure.event_type, 'message': redact(self.failure.message)})
+        self.events.put({'type': 'stream_closed', 'retryable': bool(allow_recovery and self.failure and self.failure.recovery)})
+
+
+def _open_session(events, endpoint, reconnecting=False):
+    if type(endpoint) is not LocalEngineEndpoint:
+        _report_open_failure(events, '앱에서 시작한 로컬 엔진에만 연결할 수 있습니다.')
+        return None
+    session = PcmSession(events)
+    try:
+        session.open(endpoint, reconnecting=reconnecting)
+    except websocket.WebSocketBadStatusException as exc:
+        _report_open_failure(events, f'로컬 엔진이 연결을 거부했습니다. (HTTP {exc.status_code})',
+                             retryable=exc.status_code in (429, 503))
+    except SOCKET_ERRORS as exc:
+        _report_open_failure(events, f'로컬 엔진 연결에 실패했습니다. ({exc})', retryable=True)
+    except (ValueError, RuntimeError) as exc:
+        _report_open_failure(events, f'로컬 엔진 연결에 실패했습니다. ({exc})')
+    else:
+        return session
+    return None
+
+
+def _report_open_failure(events, message, *, retryable=False):
+    message = redact(message)
+    logger.warning('%s', message)
+    events.put({'type': 'asr_error', 'message': message})
+    events.put({'type': 'stream_closed', 'retryable': retryable})
+
+
+def _asr_log_handler():
+    try:
+        file = data_dir() / 'logs' / 'asr-client.log'
+        file.parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(file, maxBytes=500_000, backupCount=1, encoding='utf-8')
+    except OSError:
+        return None
+    handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+    return handler
+
+
+def asr_client_process_main(cmd_queue: Queue, event_queue: Queue):
+    handler = _asr_log_handler()
+    previous_level = logger.level
+    if handler is not None:
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+    try:
+        _run_client(cmd_queue, event_queue)
+    finally:
+        if handler is not None:
+            logger.removeHandler(handler)
+            logger.setLevel(previous_level)
+            handler.close()
+
+
+def _run_client(cmd_queue, event_queue):
+    session = None
+    endpoint = None
+    can_retry = False
+    reconnect_at = None
+    try:
+        while True:
             try:
-                ws.recv()
-            except Exception:
-                pass
-            try:
-                ws.close()
-            except Exception:
-                pass
-            ws = None
+                message = cmd_queue.get(timeout=.1)
+            except Empty:
+                message = {}
+            kind = message.get('type')
 
-        event_queue.put({"type": "stream_closed"})
+            # An explicit stop takes priority over a pending reconnect.
+            if kind in ('pause_stream', 'shutdown'):
+                if session:
+                    session.close()
+                    session = None
+                elif reconnect_at is not None:
+                    event_queue.put({'type': 'stream_closed', 'retryable': False})
+                reconnect_at = None
+                if kind == 'shutdown':
+                    return
+                continue
 
-    def open_new_stream(target_url: str) -> bool:
-        nonlocal ws, ffmpeg_proc, stream_active
-        close_stream_gracefully()
-        message_processor.reset()
-        proc = _start_ffmpeg()
-        if proc is None:
-            return False
-        try:
-            client = websocket.WebSocket()
-            client.settimeout(0.35)
-            client.connect(target_url)
-            ws = client
-            ffmpeg_proc = proc
-            stream_active = True
-            event_queue.put({"type": "stream_opened", "url": target_url})
-            return True
-        except Exception as exc:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
-            ws = None
-            ffmpeg_proc = None
-            stream_active = False
-            event_queue.put({"type": "asr_error", "message": f"WLK 연결 실패: {exc}"})
-            return False
+            if session and session.done.is_set():
+                if session.failure and session.failure.recovery == 'reconnect' and can_retry:
+                    can_retry = False
+                    session.disconnect()
+                    session = None
+                    reconnect_at = time.monotonic() + RECONNECT_DELAY
+                    event_queue.put({'type': 'stream_reconnecting'})
+                else:
+                    session.report_closed(allow_recovery=True)
+                    session = None
 
-    while True:
-        while not cmd_queue.empty():
-            msg = cmd_queue.get_nowait()
-            mtype = msg.get("type")
-
-            if mtype == "set_url":
-                new_url = str(msg.get("url", "")).strip()
-                if new_url:
-                    server_url = new_url
-
-            elif mtype == "start_stream":
-                url = str(msg.get("url") or server_url).strip()
-                if url:
-                    server_url = url
-                open_new_stream(server_url)
-
-            elif mtype == "pause_stream":
-                close_stream_gracefully()
-
-            elif mtype == "audio_chunk":
-                if stream_active and ffmpeg_proc is not None and ffmpeg_proc.stdin is not None:
-                    pcm_bytes = msg.get("pcm_bytes")
-                    if pcm_bytes:
-                        try:
-                            ffmpeg_proc.stdin.write(pcm_bytes)
-                            ffmpeg_proc.stdin.flush()
-                        except Exception as exc:
-                            stream_active = False
-                            event_queue.put({
-                                "type": "asr_error",
-                                "message": f"오디오 인코딩 중 오류: {exc}",
-                            })
-
-            elif mtype == "shutdown":
-                close_stream_gracefully()
-                return
-
-        if stream_active and ws is not None:
-            try:
-                raw = ws.recv()
-                if raw is not None:
-                    if isinstance(raw, bytes):
-                        raw_str = raw.decode("utf-8", errors="ignore")
-                    else:
-                        raw_str = str(raw)
-                    for ev in message_processor.process(raw_str):
-                        event_queue.put(ev)
-            except websocket.WebSocketTimeoutException:
-                pass
-            except Exception as exc:
-                stream_active = False
-                try:
-                    if ws is not None:
-                        ws.close()
-                except Exception:
-                    pass
-                ws = None
-                event_queue.put({"type": "asr_error", "message": f"자막 수신 중단: {exc}"})
-
-        time.sleep(0.02)
+            if kind == 'start_stream':
+                if session:
+                    session.close()
+                reconnect_at = None
+                endpoint = message.get('endpoint')
+                session = _open_session(event_queue, endpoint)
+                can_retry = session is not None
+            else:
+                if reconnect_at is not None and time.monotonic() >= reconnect_at:
+                    reconnect_at = None
+                    session = _open_session(event_queue, endpoint, reconnecting=True)
+                if kind == 'audio_chunk' and session:
+                    session.send(message.get('pcm_bytes', b''))
+    finally:
+        if session:
+            session.disconnect()
