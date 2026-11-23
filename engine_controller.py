@@ -27,7 +27,7 @@ class Operation(QThread):
 class EngineController(QObject):
     progress = Signal(int, str)
     changed = Signal()
-    applied = Signal(str)
+    applied = Signal()
     failed = Signal(str)
     def __init__(self, parent=None, settings=None):
         super().__init__(parent)
@@ -122,8 +122,14 @@ class EngineController(QObject):
         def success(value):
             self.active_id = value
             self.settings.save(model_id=value, diarization=diarization, device=device)
-            self.applied.emit(self.server.url)
-        return self.run_task(action, success)
+            self.applied.emit()
+        return self.run_task(action, success, kind='apply')
+
+    def restart(self):
+        def success(model_id):
+            self.active_id = model_id
+            self.applied.emit()
+        return self.run_task(self.server.restart, success, kind='restart')
 
     def stop_task(self):
         if self.operation:

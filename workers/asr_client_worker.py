@@ -5,15 +5,19 @@ import logging
 from logging.handlers import RotatingFileHandler
 from multiprocessing import Queue
 from queue import Empty
+import socket
 import threading
+import time
 import websocket
 from app_paths import data_dir
+from local_engine import LOCAL_HOST, LocalEngineEndpoint
 from runtime_install import redact
 from speaker_labeler import normalize_speaker_id
 
 
 logger = logging.getLogger(__name__)
 SOCKET_ERRORS = (OSError, websocket.WebSocketException)
+RECONNECT_DELAY = .6
 
 def _time_to_ms(value):
     if value is None or value == '': return None
@@ -104,25 +108,38 @@ class PcmSession:
         self.receiver = None
         self.processor = WlkMessageProcessor()
         self.done = threading.Event()
+        self.draining = threading.Event()
         self.failure = None
         self._result_lock = threading.Lock()
 
-    def open(self, url, *, reconnecting=False):
+    def open(self, endpoint: LocalEngineEndpoint, *, reconnecting=False):
         self.ws = self.factory(enable_multithread=True)
+        direct = None
         try:
-            self.ws.settimeout(3 if reconnecting else 10)
-            self.ws.connect(url)
-            config = json.loads(self.ws.recv())
+            timeout = 3 if reconnecting else 10
+            self.ws.settimeout(timeout)
+            # A preconnected socket bypasses proxy discovery in websocket-client.
+            direct = socket.create_connection((LOCAL_HOST, endpoint.port), timeout=timeout)
+            direct.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self.ws.connect(endpoint.asr_url, socket=direct, header=endpoint.headers, redirect_limit=0)
+            if self.ws.getstatus() != 101:
+                raise RuntimeError('로컬 엔진이 WebSocket 연결을 승인하지 않았습니다.')
+            raw_config = self.ws.recv()
+            if not raw_config:
+                raise websocket.WebSocketConnectionClosedException('로컬 엔진이 연결을 종료했습니다.')
+            config = json.loads(raw_config)
             if error := _server_error(config):
                 raise RuntimeError(error)
             if not isinstance(config, dict) or config.get('type') != 'config' or not config.get('useAudioWorklet'):
-                raise RuntimeError('서버가 PCM 입력을 지원하지 않습니다. 설정에서 모델을 적용하거나 외부 WLK를 --pcm-input으로 실행해 주세요.')
+                raise RuntimeError('로컬 엔진이 PCM 입력을 지원하지 않습니다. 설정에서 모델을 다시 적용해 주세요.')
         except Exception:
             self.disconnect()
+            if direct is not None:
+                direct.close()
             raise
         self.ws.settimeout(3)
         logger.info('Subtitle stream %s', 'reconnected' if reconnecting else 'opened')
-        self.events.put({'type': 'stream_reopened' if reconnecting else 'stream_opened', 'url': url})
+        self.events.put({'type': 'stream_reopened' if reconnecting else 'stream_opened'})
         self.receiver = threading.Thread(target=self._receive, args=(self.ws,), daemon=True)
         self.receiver.start()
 
@@ -150,7 +167,7 @@ class PcmSession:
                     reason = raw[2:].decode('utf-8', errors='replace')
                     details = f'{code} {reason}'.strip() if code else '종료 코드 없음'
                     self._finish(StreamFailure(f'자막 서버 연결이 일찍 종료되었습니다. ({details})',
-                                               retryable=code in (None, 1001, 1012, 1013)))
+                                               retryable=code in (None, 1000, 1001, 1006, 1011, 1012, 1013)))
                     return
                 if self.done.is_set():
                     return
@@ -158,7 +175,10 @@ class PcmSession:
                     raw = raw.decode('utf-8')
                 for event in self.processor.process(raw):
                     if event['type'] == 'ready_to_stop':
-                        self._finish()
+                        if self.draining.is_set():
+                            self._finish()
+                        else:
+                            self._finish(StreamFailure('로컬 엔진이 자막 처리를 일찍 끝냈습니다.', retryable=True))
                         return
                     if event['type'] == 'asr_error':
                         self._finish(StreamFailure(event['message']))
@@ -185,6 +205,7 @@ class PcmSession:
         if self.ws is None:
             return
         if not self.done.is_set():
+            self.draining.set()
             self.events.put({'type': 'stream_draining'})
             # The recorder enqueues all earlier PCM before its stop command.
             self._send(b'')
@@ -208,24 +229,37 @@ class PcmSession:
         if self.receiver is not None:
             self.receiver.join(timeout=1)
 
-    def report_closed(self):
+    def report_closed(self, *, allow_recovery=False):
         self.disconnect()
         if self.failure:
             self.events.put({'type': self.failure.event_type, 'message': redact(self.failure.message)})
-        self.events.put({'type': 'stream_closed'})
+        self.events.put({'type': 'stream_closed', 'retryable': bool(allow_recovery and self.failure and self.failure.retryable)})
 
 
-def _open_session(events, url, reconnecting=False):
+def _open_session(events, endpoint, reconnecting=False):
+    if type(endpoint) is not LocalEngineEndpoint:
+        _report_open_failure(events, '앱에서 시작한 로컬 엔진에만 연결할 수 있습니다.')
+        return None
     session = PcmSession(events)
     try:
-        session.open(url, reconnecting=reconnecting)
-    except (OSError, websocket.WebSocketException, ValueError, RuntimeError) as exc:
-        message = redact(f'자막 서버 연결에 실패했습니다. ({exc})')
-        logger.warning('%s', message)
-        events.put({'type': 'asr_error', 'message': message})
-        events.put({'type': 'stream_closed'})
-        return None
-    return session
+        session.open(endpoint, reconnecting=reconnecting)
+    except websocket.WebSocketBadStatusException as exc:
+        _report_open_failure(events, f'로컬 엔진이 연결을 거부했습니다. (HTTP {exc.status_code})',
+                             retryable=exc.status_code in (429, 503))
+    except SOCKET_ERRORS as exc:
+        _report_open_failure(events, f'로컬 엔진 연결에 실패했습니다. ({exc})', retryable=True)
+    except (ValueError, RuntimeError) as exc:
+        _report_open_failure(events, f'로컬 엔진 연결에 실패했습니다. ({exc})')
+    else:
+        return session
+    return None
+
+
+def _report_open_failure(events, message, *, retryable=False):
+    message = redact(message)
+    logger.warning('%s', message)
+    events.put({'type': 'asr_error', 'message': message})
+    events.put({'type': 'stream_closed', 'retryable': retryable})
 
 
 def _asr_log_handler():
@@ -256,8 +290,9 @@ def asr_client_process_main(cmd_queue: Queue, event_queue: Queue):
 
 def _run_client(cmd_queue, event_queue):
     session = None
-    url = ''
+    endpoint = None
     can_retry = False
+    reconnect_at = None
     try:
         while True:
             try:
@@ -271,6 +306,9 @@ def _run_client(cmd_queue, event_queue):
                 if session:
                     session.close()
                     session = None
+                elif reconnect_at is not None:
+                    event_queue.put({'type': 'stream_closed', 'retryable': False})
+                reconnect_at = None
                 if kind == 'shutdown':
                     return
                 continue
@@ -279,20 +317,26 @@ def _run_client(cmd_queue, event_queue):
                 if session.failure and session.failure.retryable and can_retry:
                     can_retry = False
                     session.disconnect()
+                    session = None
+                    reconnect_at = time.monotonic() + RECONNECT_DELAY
                     event_queue.put({'type': 'stream_reconnecting'})
-                    session = _open_session(event_queue, url, reconnecting=True)
                 else:
-                    session.report_closed()
+                    session.report_closed(allow_recovery=True)
                     session = None
 
             if kind == 'start_stream':
                 if session:
                     session.close()
-                url = str(message['url'])
-                session = _open_session(event_queue, url)
+                reconnect_at = None
+                endpoint = message.get('endpoint')
+                session = _open_session(event_queue, endpoint)
                 can_retry = session is not None
-            elif kind == 'audio_chunk' and session:
-                session.send(message.get('pcm_bytes', b''))
+            else:
+                if reconnect_at is not None and time.monotonic() >= reconnect_at:
+                    reconnect_at = None
+                    session = _open_session(event_queue, endpoint, reconnecting=True)
+                if kind == 'audio_chunk' and session:
+                    session.send(message.get('pcm_bytes', b''))
     finally:
         if session:
             session.disconnect()

@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
+from local_engine import LocalEngineEndpoint
 from model_catalog import MODELS
 from model_service import ModelStore, RuntimeManager, Cancelled, wanted_file
 from app_paths import SettingsStore, atomic_json
@@ -123,7 +124,7 @@ def test_real_websocket_drains_final_results_before_close():
         port = server.socket.getsockname()[1]
         events = queue.Queue()
         session = PcmSession(events)
-        session.open(f'ws://127.0.0.1:{port}/asr')
+        session.open(LocalEngineEndpoint(port, 'test-engine-key'))
         session.send(b'first pcm')
         session.send(b'tail pcm')
         session.close(timeout=3)
@@ -276,6 +277,50 @@ def test_server_failure_keeps_confirmed_text_and_does_not_request_another_eof(wi
     assert window.sub_mode == '중단(녹음 유지)'
 
 
+def test_local_engine_restarts_once_and_retains_last_confirmed_caption(window, monkeypatch):
+    window.rec_cmd_queue = queue.Queue()
+    window.rec_event_queue = queue.Queue()
+    window.asr_cmd_queue = queue.Queue()
+    window.asr_event_queue = queue.Queue()
+    window.is_live_asr_active = True
+    window.is_recording = True
+    server = window.controller.server
+    server.config = object()
+    restarts = []
+    new_endpoint = LocalEngineEndpoint(30001, 'new-engine-key')
+
+    def restart(*args):
+        restarts.append(True)
+        server.proc = SimpleNamespace(poll=lambda: None, terminate=lambda: None, wait=lambda **kwargs: 0)
+        server._endpoint = new_endpoint
+        return 'whisper-turbo'
+
+    monkeypatch.setattr(server, 'restart', restart)
+
+    def disconnect():
+        window.asr_event_queue.put({'type': 'asr_error', 'message': '연결 끊김'})
+        window.asr_event_queue.put({'type': 'stream_closed', 'retryable': True})
+        window._poll_worker_events()
+        assert window.is_recording
+        assert window.rec_cmd_queue.get_nowait() == {'type': 'disable_asr'}
+
+    window.asr_event_queue.put({'type': 'transcript_snapshot', 'lines': [line('확정 자막입니다.')]})
+    disconnect()
+    pump_until(lambda: not window.asr_cmd_queue.empty())
+    assert window.asr_cmd_queue.get_nowait() == {'type': 'start_stream', 'endpoint': new_endpoint}
+    window.asr_event_queue.put({'type': 'stream_opened'})
+    window.asr_event_queue.put({'type': 'transcript_snapshot', 'lines': [], 'partial': '복구된 자막'})
+    window._poll_worker_events()
+    assert window.rec_cmd_queue.get_nowait() == {'type': 'set_asr_streaming', 'enabled': True}
+    assert window.current_text == '복구된 자막'
+    assert window.previous_subtitles == ['[화자 1] 확정 자막입니다.']
+    assert len(window.history_entries) == 1
+    disconnect()
+    assert restarts == [True]
+    assert not window.controller.busy
+    assert window.sub_mode == '중단(녹음 유지)'
+
+
 def test_speaker_name_button_saves_and_updates_existing_subtitles(window, monkeypatch):
     from PySide6.QtWidgets import QPushButton
     from ui.main_window import SpeakerLabelDialog
@@ -400,7 +445,6 @@ def test_model_selection_persisted_only_after_engine_ready(window, monkeypatch):
     states = []
     def start(*args):
         states.append(controller.settings.value['model_id'])
-        controller.server.port = 30000
     monkeypatch.setattr(controller.server, 'start', start)
     assert controller.apply('qwen-0.6b', False, 'cpu')
     pump_until(lambda: not controller.busy)

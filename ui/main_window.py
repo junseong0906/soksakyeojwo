@@ -110,8 +110,11 @@ class MainWindow(QMainWindow):
         self.controller = controller or EngineController(self)
         self.transcript_store = TranscriptStore()
         self.session_history = []
+        self.previous_session_captions = []
         self.pending_model = None
         self.resume_after_apply = False
+        self.engine_restart_pending = False
+        self.engine_restart_attempted = False
         self.stream_busy = False
         self.closing = False
         self.model_dialog = None
@@ -145,7 +148,7 @@ class MainWindow(QMainWindow):
 
         self.previous_subtitles: list[str] = []
         self.event_captions: list[str] = []
-        self.current_text: str = "WLK 서버로 실시간 자막을 시작하거나 「테스트 자막 재생」을 눌러보세요"
+        self.current_text: str = "「실시간 자막 시작」 또는 「테스트 자막 재생」을 눌러보세요"
         self.current_is_final: bool = True
         self.speaker_labeler = SpeakerLabeler(self.controller.settings.value['speaker_labels'])
 
@@ -284,19 +287,14 @@ class MainWindow(QMainWindow):
             QPushButton#bookmarkBtn:hover {
                 background-color: #FFF04D;
             }
-            QLineEdit#searchInput, QLineEdit#urlInput {
+            QLineEdit#searchInput {
                 color: #FFFFFF;
                 background-color: #1A1A1A;
                 border: 1px solid #525252;
                 border-radius: 6px;
                 padding: 6px 10px;
                 font-size: 13px;
-            }
-            QLineEdit#searchInput {
                 min-width: 190px;
-            }
-            QLineEdit#urlInput {
-                min-width: 210px;
             }
             QTextBrowser#historyBrowser {
                 color: #F3F4F6;
@@ -400,7 +398,7 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(self.bookmark_btn)
         main_layout.addWidget(self.top_bar)
 
-        # 2. 마이크 & WLK 주소 바
+        # 2. 마이크와 녹음 설정
         self.mic_bar = QWidget()
         self.mic_bar.setObjectName("micBar")
         mic_layout = QHBoxLayout(self.mic_bar)
@@ -428,12 +426,6 @@ class MainWindow(QMainWindow):
         self.level_bar.setValue(0)
         self.level_bar.setFormat("0%")
 
-        url_title = QLabel("WLK:")
-        url_title.setObjectName("infoText")
-
-        self.wlk_url_input = QLineEdit("ws://127.0.0.1:8000/asr")
-        self.wlk_url_input.setObjectName("urlInput")
-
         self.speaker_btn = QPushButton("화자 이름 설정")
         self.speaker_btn.clicked.connect(self.open_speaker_label_dialog)
 
@@ -449,8 +441,6 @@ class MainWindow(QMainWindow):
         mic_layout.addWidget(level_title)
         mic_layout.addWidget(self.level_bar)
         mic_layout.addSpacing(6)
-        mic_layout.addWidget(url_title)
-        mic_layout.addWidget(self.wlk_url_input)
         mic_layout.addWidget(self.speaker_btn)
         mic_layout.addStretch(1)
         mic_layout.addWidget(self.focus_hint_label)
@@ -708,6 +698,7 @@ class MainWindow(QMainWindow):
             if etype in ("stream_opened", "stream_reopened"):
                 self._discard_pending_caption()
                 self.session_history = list(self.history_entries)
+                self.previous_session_captions = self._recent_confirmed_captions()
                 self.transcript_store = TranscriptStore()
                 self.event_captions = []
                 self.is_live_asr_active = True
@@ -717,7 +708,7 @@ class MainWindow(QMainWindow):
                         self.rec_cmd_queue.put({'type': 'set_asr_streaming', 'enabled': True})
                 self.live_asr_btn.setEnabled(not self.stream_busy and not self.closing)
                 self.sub_mode = "수신 중"
-                self.sub_status_label.setText("자막: 연결 복구됨" if etype == "stream_reopened" else "자막: WLK 연결됨")
+                self.sub_status_label.setText("자막: 로컬 엔진 연결됨")
                 self.live_asr_btn.setText("자막 일시정지")
                 self.critical_alert_banner.hide()
                 self.record_only_timer.stop()
@@ -744,10 +735,14 @@ class MainWindow(QMainWindow):
                     self.sub_status_label.setText("자막: 일시정지/대기")
                 self._discard_pending_caption()
                 self.refresh_subtitles()
-                if self.pending_model:
+                if self.pending_model and not self.closing:
                     request = self.pending_model
                     self.pending_model = None
+                    self.stream_busy = True
                     self.controller.apply(*request)
+                elif (ev.get('retryable') and not self.engine_restart_attempted
+                      and self.controller.server.config is not None and not self.closing):
+                    self._schedule_engine_restart()
 
             elif etype == 'stream_draining':
                 self.sub_status_label.setText('자막: 마지막 음성을 처리하는 중…')
@@ -770,15 +765,8 @@ class MainWindow(QMainWindow):
                     self.sub_status_label.setText("자막: 연결 유지 중")
 
             elif etype == "asr_error":
-                err_msg = str(ev.get("message", "WLK 오류"))
-                self.is_live_asr_active = False
-                self.stream_busy = False
-                self._show_toast(err_msg)
-                if self.is_recording:
-                    self.set_record_only_mode()
-                else:
-                    self.sub_mode = "연결 오류"
-                    self.sub_status_label.setText("자막: 연결 오류")
+                self._show_toast(str(ev.get("message", "로컬 엔진 오류")))
+                self._show_stream_failure()
 
         if snapshot_changed:
             self._render_snapshot()
@@ -821,7 +809,7 @@ class MainWindow(QMainWindow):
                 newest_first.append(self._format_line(line, part))
                 if len(newest_first) == 2:
                     return list(reversed(newest_first))
-        return list(reversed(newest_first))
+        return (self.previous_session_captions + list(reversed(newest_first)))[-2:]
 
     def _render_snapshot(self):
         lines = self.transcript_store.lines
@@ -860,22 +848,55 @@ class MainWindow(QMainWindow):
         if self.search_input.text(): self._rebuild_search_spans(self.search_input.text(), keep_current=True)
 
     def toggle_live_asr(self):
-        if self.stream_busy or self.pending_model or self.controller.busy: return
+        if self.stream_busy or self.pending_model or self.controller.busy or self.closing: return
         if self.is_playing_sample: self.toggle_sample_subtitles()
-        self.stream_busy = True
-        self.live_asr_btn.setEnabled(False)
-        if not self.is_live_asr_active:
-            if not self.controller.active_id:
-                self.stream_busy = False
-                self.live_asr_btn.setEnabled(True)
-                self.open_model_settings()
-                self._show_toast('설정에서 모델을 다운로드하고 적용해 주세요.')
-                return
-            self.asr_cmd_queue.put({'type': 'start_stream', 'url': self.wlk_url_input.text().strip()})
-            self.sub_status_label.setText('자막: 연결하는 중…')
-        else:
+        if self.is_live_asr_active:
+            self.stream_busy = True
+            self.live_asr_btn.setEnabled(False)
             self.rec_cmd_queue.put({'type': 'stop_asr'})
             self.sub_status_label.setText('자막: 마지막 음성을 처리하는 중…')
+        elif self.controller.server.endpoint is not None:
+            self.engine_restart_attempted = False
+            self._start_local_stream()
+        elif self.controller.server.config is not None:
+            self._schedule_engine_restart()
+        else:
+            self.open_model_settings()
+            self._show_toast('설정에서 모델을 다운로드하고 적용해 주세요.')
+
+    def _start_local_stream(self):
+        endpoint = self.controller.server.endpoint
+        if endpoint is None:
+            self.stream_busy = False
+            self._show_stream_failure()
+            self._engine_state_changed()
+            return
+        self.stream_busy = True
+        self.live_asr_btn.setEnabled(False)
+        self.asr_cmd_queue.put({'type': 'start_stream', 'endpoint': endpoint})
+        self.sub_status_label.setText('자막: 로컬 엔진에 연결하는 중…')
+
+    def _show_stream_failure(self):
+        if self.is_recording:
+            self.set_record_only_mode()
+        else:
+            self.sub_mode = '연결 오류'
+            self.sub_status_label.setText('자막: 로컬 엔진 연결 오류')
+
+    def _schedule_engine_restart(self):
+        self.engine_restart_attempted = True
+        self.engine_restart_pending = True
+        self.resume_after_apply = True
+        self.stream_busy = True
+        self.live_asr_btn.setEnabled(False)
+        self.sub_mode = '재연결 중'
+        self.sub_status_label.setText('자막: 로컬 엔진을 다시 시작하는 중…')
+        self._start_pending_restart()
+
+    def _start_pending_restart(self):
+        if self.engine_restart_pending and not self.controller.busy and not self.closing:
+            self.engine_restart_pending = False
+            self.controller.restart()
 
     def open_model_settings(self):
         if self.model_dialog is None:
@@ -889,6 +910,7 @@ class MainWindow(QMainWindow):
     def request_model(self, model_id, diarization, device, token):
         if self.pending_model or self.controller.busy or self.stream_busy: return
         self.resume_after_apply = self.is_live_asr_active
+        self.engine_restart_attempted = False
         if self.is_live_asr_active:
             self.pending_model = (model_id, diarization, device, token)
             self.stream_busy = True
@@ -902,7 +924,8 @@ class MainWindow(QMainWindow):
         self.model_status_label.setText(message[:180])
 
     def _engine_state_changed(self):
-        self.live_asr_btn.setEnabled(not self.controller.busy and not self.stream_busy)
+        self._start_pending_restart()
+        self.live_asr_btn.setEnabled(not self.controller.busy and not self.stream_busy and not self.closing)
         if not self.controller.busy:
             if self.controller.active_id:
                 model = get_model(self.controller.active_id)
@@ -911,25 +934,28 @@ class MainWindow(QMainWindow):
             else: self.model_status_label.setText(self.controller.status[:180])
         if self.model_dialog: self.model_dialog.refresh()
 
-    def _engine_applied(self, url):
-        self.wlk_url_input.setText(url)
-        self._show_toast('모델 적용 완료')
+    def _engine_applied(self):
+        self._show_toast('로컬 엔진 복구 완료' if self.controller.task_kind == 'restart' else '모델 적용 완료')
         if self.resume_after_apply:
             self.resume_after_apply = False
             QTimer.singleShot(100, self._resume_after_engine)
 
     def _resume_after_engine(self):
+        if self.closing: return
         if self.controller.busy:
             QTimer.singleShot(100, self._resume_after_engine)
             return
-        if not self.is_live_asr_active and not self.closing: self.toggle_live_asr()
+        if not self.is_live_asr_active: self._start_local_stream()
 
     def _engine_failed(self, message):
         self._show_toast(message.split('\n')[0][:160])
-        if self.resume_after_apply and self.controller.server.proc is not None:
-            self.wlk_url_input.setText(self.controller.server.url)
+        if self.resume_after_apply and not self.engine_restart_pending and not self.closing:
             self.resume_after_apply = False
-            QTimer.singleShot(100, self._resume_after_engine)
+            if self.controller.task_kind != 'restart' and self.controller.server.endpoint is not None:
+                QTimer.singleShot(100, self._resume_after_engine)
+            else:
+                self.stream_busy = False
+                self._show_stream_failure()
 
     def on_device_changed(self, combo_idx: int) -> None:
         dev_idx = self.mic_combo.itemData(combo_idx)
@@ -948,6 +974,7 @@ class MainWindow(QMainWindow):
         self.closing = True
         self.pending_model = None
         self.resume_after_apply = False
+        self.engine_restart_pending = False
         self.controller.stop_task()
         self.model_settings_btn.setEnabled(False)
         self.live_asr_btn.setEnabled(False)
@@ -1155,7 +1182,7 @@ class MainWindow(QMainWindow):
         self.record_only_seconds = 31
         self.record_only_counter_label.setText(f"중단 경과: {self.record_only_seconds}초 / 30초")
         self.critical_alert_banner.setText(
-            f"[경고] 녹음만 유지되고 자막 중단이 {self.record_only_seconds}초 지속됨(30초 허용 목표 초과) — 로컬 전환/상태 확인 필요"
+            f"[경고] 자막 중단이 {self.record_only_seconds}초 지속됨 · 녹음은 계속 저장 중 · 로컬 엔진 상태 확인 필요"
         )
         self.critical_alert_banner.show()
 
@@ -1181,7 +1208,7 @@ class MainWindow(QMainWindow):
         self.record_only_counter_label.setText(f"중단 경과: {self.record_only_seconds}초 / 30초")
         if self.record_only_seconds > self.alert_threshold_sec:
             self.critical_alert_banner.setText(
-                f"[경고] 녹음만 유지되고 자막 중단이 {self.record_only_seconds}초 지속됨(30초 허용 목표 초과) — 로컬 전환/상태 확인 필요"
+                f"[경고] 자막 중단이 {self.record_only_seconds}초 지속됨 · 녹음은 계속 저장 중 · 로컬 엔진 상태 확인 필요"
             )
             self.critical_alert_banner.show()
 

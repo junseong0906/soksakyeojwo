@@ -2,11 +2,13 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import secrets
 import socket
 import subprocess
 import time
 import urllib.request
 from app_paths import data_dir
+from local_engine import HEALTH_PATH, LOCAL_HOST, LocalEngineEndpoint
 from model_service import check_cancel, hidden_flags
 from external_process import external_popen
 
@@ -131,21 +133,43 @@ if '--diarization' in sys.argv:
         return original_diarization_factory(args, backend)
     wlk_core.online_diarization_factory = new_diarization_session
     wlk_processor.online_diarization_factory = new_diarization_session
-from whisperlivekit.basic_server import main
-main()
+basic_server = importlib.import_module('whisperlivekit.basic_server')
+if health_path := os.environ.get('SOKSAK_HEALTH_PATH'):
+    import hmac
+    import json
+    from fastapi import Request, HTTPException
+
+    @basic_server.router.get(health_path, include_in_schema=False)
+    async def managed_health(request: Request):
+        expected = 'Bearer ' + os.environ['WLK_API_TOKEN']
+        if not hmac.compare_digest(request.headers.get('authorization', '').encode(), expected.encode()):
+            raise HTTPException(status_code=403)
+        health = await basic_server.health(request)
+        return {**json.loads(health.body), 'pid': os.getpid()}
+
+basic_server.main()
 '''
 
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class WlkServerManager:
-    """Owns only processes started by this app; readiness requires WLK /health."""
+    """Own the local engine and expose an endpoint only while its process is ready."""
     def __init__(self):
         self.proc = None
         self.log = None
-        self.port = None
+        self._endpoint = None
         self.config = None
 
     @property
-    def url(self):
-        return f'ws://127.0.0.1:{self.port}/asr?mode=full'
+    def endpoint(self):
+        proc = self.proc
+        if proc is not None and proc.poll() is None:
+            return self._endpoint
+        return None
 
     def start(self, python, model, model_path, diarization, device, token, progress, cancel):
         previous = self.config
@@ -165,11 +189,26 @@ class WlkServerManager:
                     self.stop_if_started()
             raise
 
+    def restart(self, progress, cancel):
+        config = self.config
+        if config is None:
+            raise RuntimeError('복구할 로컬 엔진이 없습니다. 설정에서 모델을 적용해 주세요.')
+        if self.log is not None and self.proc is not None:
+            self.log.write(f'\nRestarting local engine (pid={self.proc.pid}, exit={self.proc.poll()})\n'.encode())
+        self.stop_if_started()
+        try:
+            self._launch(config, progress, cancel)
+        except Exception:
+            self.stop_if_started()
+            raise
+        return config[1].id
+
     def _launch(self, config, progress, cancel):
         python, model, model_path, diarization, device, token = config
+        check_cancel(cancel)
         with socket.socket() as listener:
-            listener.bind(('127.0.0.1', 0))
-            self.port = listener.getsockname()[1]
+            listener.bind((LOCAL_HOST, 0))
+            endpoint = LocalEngineEndpoint(listener.getsockname()[1], secrets.token_urlsafe(32))
         logs = data_dir() / 'logs'
         logs.mkdir(exist_ok=True)
         path = logs / 'wlk_server.log'
@@ -178,27 +217,35 @@ class WlkServerManager:
             path.replace(logs / 'wlk_server.previous.log')
         self.log = path.open('ab', buffering=0)
         command = [str(python), '-c', SERVER_BOOTSTRAP,
-                   '--host', '127.0.0.1', '--port', str(self.port), *model.arguments(Path(model_path), diarization, device)]
+                   '--host', LOCAL_HOST, '--port', str(endpoint.port),
+                   '--session-idle-timeout', '0',
+                   *model.arguments(Path(model_path), diarization, device)]
         env = {**os.environ, 'PYTHONUTF8': '1', 'PYTHONUNBUFFERED': '1',
                'HF_HOME': str(data_dir() / 'hf-cache'), 'HF_HUB_DISABLE_XET': '1',
                'PYANNOTE_CACHE': str(data_dir() / 'hf-cache/hub'),
-               'SOKSAK_DEVICE': 'cuda' if device == 'cuda' else 'cpu'}
+               'SOKSAK_DEVICE': 'cuda' if device == 'cuda' else 'cpu',
+               'SOKSAK_HEALTH_PATH': HEALTH_PATH, 'WLK_API_TOKEN': endpoint.access_key}
         if device != 'cuda': env['CUDA_VISIBLE_DEVICES'] = ''
         if token: env['HF_TOKEN'] = token
         self.proc = external_popen(command, stdin=subprocess.DEVNULL, stdout=self.log, stderr=subprocess.STDOUT,
                                      creationflags=hidden_flags(), env=env)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+        request = urllib.request.Request(endpoint.health_url, headers=endpoint.headers)
         started = time.monotonic()
         deadline = started + 600
         while time.monotonic() < deadline:
             check_cancel(cancel)
             if self.proc.poll() is not None:
                 tail = path.read_text(encoding='utf-8', errors='replace')[-2400:]
+                tail = tail.replace(endpoint.access_key, '[key]')
                 if token: tail = tail.replace(token, '[token]')
                 raise RuntimeError('엔진 시작에 실패했습니다. 설정의 실행환경 준비와 모델 권한을 확인해 주세요.\n' + tail)
             try:
-                with urllib.request.urlopen(f'http://127.0.0.1:{self.port}/health', timeout=.5) as response:
+                with opener.open(request, timeout=.5) as response:
                     health = json.load(response)
-                if health.get('ready') is True and health.get('backend') == model.backend:
+                if (isinstance(health, dict) and health.get('pid') == self.proc.pid
+                        and health.get('ready') is True and health.get('backend') == model.backend):
+                    self._endpoint = endpoint
                     progress(100, f'{model.name} 사용 중 · 한국어 · 화자 분리 ' + ('켜짐' if diarization else '꺼짐'))
                     return
             except (OSError, ValueError): pass
@@ -208,6 +255,7 @@ class WlkServerManager:
         raise RuntimeError('엔진 준비 제한 시간(10분)을 초과했습니다. data/logs/wlk_server.log를 확인해 주세요.')
 
     def stop_if_started(self):
+        self._endpoint = None
         if self.proc is not None:
             if self.proc.poll() is None:
                 self.proc.terminate()

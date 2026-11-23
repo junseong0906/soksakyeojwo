@@ -6,6 +6,7 @@ import pytest
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.server import serve
 
+from local_engine import LocalEngineEndpoint
 from workers.asr_client_worker import PcmSession, _run_client
 
 
@@ -13,10 +14,13 @@ def send_config(socket):
     socket.send(json.dumps({'type': 'config', 'useAudioWorklet': True}))
 
 
-def test_server_error_with_snapshot_fields_closes_once_without_sending_eof():
+def test_server_error_with_snapshot_fields_closes_once_without_sending_eof(monkeypatch):
     received = []
+    monkeypatch.setenv('HTTP_PROXY', 'http://127.0.0.1:1')
+    monkeypatch.setenv('NO_PROXY', '')
 
     def handle(socket):
+        assert socket.request.headers['Authorization'] == 'Bearer test-engine-key'
         send_config(socket)
         received.append(socket.recv(timeout=4))
         socket.send(json.dumps({'status': 'error', 'error': 'Unable to format transcription results.',
@@ -28,10 +32,10 @@ def test_server_error_with_snapshot_fields_closes_once_without_sending_eof():
 
     with serve(handle, '127.0.0.1', 0) as server:
         threading.Thread(target=server.serve_forever, daemon=True).start()
-        url = f'ws://127.0.0.1:{server.socket.getsockname()[1]}/asr'
+        endpoint = LocalEngineEndpoint(server.socket.getsockname()[1], 'test-engine-key')
         events = queue.Queue()
         session = PcmSession(events)
-        session.open(url)
+        session.open(endpoint)
         session.send(b'pcm')
         assert session.done.wait(4)
         session.close(timeout=1)
@@ -41,7 +45,7 @@ def test_server_error_with_snapshot_fields_closes_once_without_sending_eof():
     assert received == [b'pcm']
     assert list(events.queue)[1:] == [
         {'type': 'asr_error', 'message': 'Unable to format transcription results.'},
-        {'type': 'stream_closed'},
+        {'type': 'stream_closed', 'retryable': False},
     ]
 
 
@@ -66,8 +70,8 @@ def test_worker_retries_transient_close_at_most_once(second_connection_works):
         client = threading.Thread(target=_run_client, args=(commands, events), daemon=True)
         client.start()
         try:
-            url = f'ws://127.0.0.1:{server.socket.getsockname()[1]}/asr'
-            commands.put({'type': 'start_stream', 'url': url})
+            endpoint = LocalEngineEndpoint(server.socket.getsockname()[1], 'test-engine-key')
+            commands.put({'type': 'start_stream', 'endpoint': endpoint})
             assert events.get(timeout=5)['type'] == 'stream_opened'
             commands.put({'type': 'audio_chunk', 'pcm_bytes': b'before'})
             assert events.get(timeout=5)['type'] == 'stream_reconnecting'
@@ -86,4 +90,21 @@ def test_worker_retries_transient_close_at_most_once(second_connection_works):
 
     assert streams == [[b'before'], [b'after', b''] if second_connection_works else [b'after']]
     assert not client.is_alive()
+    assert events.empty()
+
+
+def test_worker_rejects_external_address_before_opening_a_socket(monkeypatch):
+    def unexpected_connect(*args, **kwargs):
+        pytest.fail('worker created a WebSocket for an external address')
+
+    monkeypatch.setattr('workers.asr_client_worker.websocket.WebSocket', unexpected_connect)
+    commands, events = queue.Queue(), queue.Queue()
+    commands.put({'type': 'start_stream', 'url': 'ws://example.invalid/asr'})
+    commands.put({'type': 'start_stream', 'endpoint': 'ws://example.invalid/asr'})
+    commands.put({'type': 'shutdown'})
+    _run_client(commands, events)
+
+    for _ in range(2):
+        assert events.get_nowait()['type'] == 'asr_error'
+        assert events.get_nowait() == {'type': 'stream_closed', 'retryable': False}
     assert events.empty()
