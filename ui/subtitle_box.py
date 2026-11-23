@@ -1,21 +1,24 @@
 import html
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QTextOption
+from PySide6.QtGui import QFont, QFontMetrics, QTextOption
 from PySide6.QtWidgets import QTextBrowser, QWidget
 
 
 class SubtitleBox(QTextBrowser):
-    """가로로 넓게 퍼지고, 세로 잘림 없이 높이가 맞춰지는 영화 자막 박스"""
+    """A centered caption box with a bounded height for live display."""
 
-    def __init__(self, target_width: int, is_current: bool = False, parent: QWidget | None = None) -> None:
+    def __init__(self, target_width: int, is_current: bool = False, parent: QWidget | None = None, *, max_lines=2) -> None:
         super().__init__(parent)
         self.target_width = target_width
         self.is_current = is_current
+        self.max_lines = max_lines
         self.is_final: bool = True
+        self._last_content = None
+        self._layout_width = None
         self.setReadOnly(True)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setWordWrapMode(QTextOption.WrapMode.WordWrap)
+        self.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         self.setFrameShape(QTextBrowser.Shape.NoFrame)
         self.apply_box_style(is_final=True)
 
@@ -56,10 +59,17 @@ class SubtitleBox(QTextBrowser):
 
     def apply_width_for_parent(self, parent_width: int) -> None:
         usable = max(320, min(self.target_width, parent_width - 80))
+        if usable == self._layout_width:
+            return
+        self._layout_width = usable
         self.setFixedWidth(usable)
         self.sync_height()
 
     def set_subtitle_text(self, text: str, font_size: int, is_final: bool = True) -> None:
+        content = (text, font_size, is_final)
+        if content == self._last_content:
+            return
+        self._last_content = content
         self.apply_box_style(is_final)
 
         font = QFont("Malgun Gothic")
@@ -78,4 +88,7 @@ class SubtitleBox(QTextBrowser):
         doc.setTextWidth(max(200, self.width() - horizontal_padding))
         doc_height = int(doc.size().height())
         vertical_padding = 28 if self.is_current else 24
-        self.setFixedHeight(max(42, doc_height + vertical_padding))
+        max_height = QFontMetrics(doc.defaultFont()).lineSpacing() * self.max_lines + 8
+        self.setFixedHeight(max(42, min(doc_height, max_height) + vertical_padding))
+        bar = self.verticalScrollBar()
+        bar.setValue(bar.maximum())

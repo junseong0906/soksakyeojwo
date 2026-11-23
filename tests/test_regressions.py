@@ -185,6 +185,15 @@ def test_asr_stop_fence_keeps_audio_before_stop_and_recording_alive(monkeypatch,
     assert sf.info(path).frames == 3200
 
 
+def test_disconnect_does_not_queue_a_second_stop_into_the_client(tmp_path):
+    asr = queue.Queue()
+    recorder = Recorder(queue.Queue(), asr, tmp_path)
+    recorder.streaming = True
+    recorder.stop_asr(drain=False)
+    assert not recorder.streaming
+    assert asr.empty()
+
+
 @pytest.fixture
 def window(monkeypatch, tmp_path):
     monkeypatch.setenv('SOKSAK_DATA_DIR', str(tmp_path))
@@ -214,6 +223,57 @@ def test_ui_snapshot_growth_does_not_duplicate_history(window):
     window._render_snapshot()
     assert len(window.history_entries) == 1
     assert '오늘은 강의를 시작합니다' in window.history_browser.toPlainText()
+
+
+def test_current_caption_has_priority_over_two_recent_confirmations(window):
+    text = '첫 번째 안내입니다. 두 번째 안내입니다. 세 번째 안내입니다. 마지막으로 정리합니다.'
+    window.transcript_store.update({'lines': [line(text)],
+                                    'diarization_buffer': '이전 화자 확인 대기 문장.',
+                                    'partial': '지금 발화하는 내용'})
+    window._render_snapshot()
+    assert window.current_subtitle_box.toPlainText() == '지금 발화하는 내용'
+    assert [box.toPlainText() for box in window.previous_subtitle_boxes] == [
+        '[화자 1] 세 번째 안내입니다.', '[화자 1] 마지막으로 정리합니다.'
+    ]
+    assert text in window.history_browser.toPlainText()
+    assert '지금 발화하는 내용' not in window.history_browser.toPlainText()
+
+    window.transcript_store.update({'lines': [line(text + ' 새롭게 확정했습니다.', speaker='spk_2')]})
+    window._render_snapshot()
+    assert len(window.history_entries) == 1
+    assert window.current_subtitle_box.toPlainText() == '[화자 2] 새롭게 확정했습니다.'
+    assert not window.previous_subtitle_boxes[0].isHidden()
+    assert window.previous_subtitle_boxes[1].isHidden()
+    assert window.previous_subtitle_boxes[0].toPlainText() == '[화자 2] 마지막으로 정리합니다.'
+
+
+def test_uncut_caption_stays_in_history_when_punctuation_is_missing(window):
+    text = ' '.join(f'구절{i}' for i in range(100))
+    window.transcript_store.update({'lines': [line(text)]})
+    window._render_snapshot()
+    caption = window.current_subtitle_box.toPlainText()
+    assert '구절99' in caption
+    assert '구절0 ' not in caption
+    assert len(caption) < 60
+    assert text in window.history_browser.toPlainText()
+
+
+def test_server_failure_keeps_confirmed_text_and_does_not_request_another_eof(window):
+    window.rec_cmd_queue = queue.Queue()
+    window.rec_event_queue = queue.Queue()
+    window.asr_event_queue = queue.Queue()
+    window.is_live_asr_active = True
+    window.is_recording = True
+    window.asr_event_queue.put({'type': 'transcript_snapshot', 'lines': [line('확정 자막입니다.')], 'partial': '임시 자막'})
+    window.asr_event_queue.put({'type': 'asr_error', 'message': 'WLK 종료'})
+    window.asr_event_queue.put({'type': 'stream_closed'})
+    window._poll_worker_events()
+    assert not window.is_live_asr_active
+    assert window.is_recording
+    assert window.rec_cmd_queue.get_nowait() == {'type': 'disable_asr'}
+    assert window.rec_cmd_queue.empty()
+    assert window.current_subtitle_box.toPlainText() == '[화자 1] 확정 자막입니다.'
+    assert window.sub_mode == '중단(녹음 유지)'
 
 
 def test_speaker_name_button_saves_and_updates_existing_subtitles(window, monkeypatch):

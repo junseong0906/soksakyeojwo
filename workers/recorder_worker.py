@@ -116,13 +116,13 @@ class Recorder:
             self.resampler = soxr.ResampleStream(self.samplerate, 16000, 1, dtype='float32') if self.samplerate != 16000 else None
             self.streaming = True
 
-    def stop_asr(self, shutdown=False):
+    def stop_asr(self, shutdown=False, drain=True):
         with self.lock:
-            if self.streaming and self.resampler:
+            if drain and self.streaming and self.resampler:
                 self._pcm(self.resampler.resample_chunk(np.empty(0, dtype=np.float32), last=True))
             self.streaming = False
             # This producer's audio and EOF command preserve their ordering in multiprocessing.Queue.
-            if self.asr_queue is not None:
+            if drain and self.asr_queue is not None:
                 self.asr_queue.put({'type': 'shutdown' if shutdown else 'pause_stream'})
 
     def close(self):
@@ -151,6 +151,7 @@ def recorder_process_main(cmd_queue: Queue, event_queue: Queue, asr_cmd_queue=No
                     if message.get('enabled'): recorder.enable_asr()
                     else: recorder.stop_asr()
                 elif kind == 'stop_asr': recorder.stop_asr()
+                elif kind == 'disable_asr': recorder.stop_asr(drain=False)
                 elif kind == 'refresh_devices':
                     event_queue.put({'type': 'devices', 'devices': query_input_devices(), 'selected': recorder.device})
                 elif kind == 'shutdown': return

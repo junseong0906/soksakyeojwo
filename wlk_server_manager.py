@@ -51,8 +51,10 @@ class SelectedDeviceModel(original):
         super().__init__(*args, **kwargs)
 faster_whisper.WhisperModel = SelectedDeviceModel
 if '--diarization' in sys.argv:
+    import re
     import torch
     from collections import defaultdict
+    from dataclasses import replace
     from typing import Any
     from torch.torch_version import TorchVersion
     from pyannote.audio.core.task import Specifications, Problem, Resolution
@@ -94,7 +96,41 @@ if '--diarization' in sys.argv:
             # Keep Torch's restricted loader; scope the allowlist to this load.
             with torch.serialization.safe_globals(checkpoint_metadata):
                 super().__init__(*args, **kwargs)
+            self._session_started = False
+
+        async def diarize(self):
+            # Diart reports zero-based names like speaker0. WLK adds one when
+            # aligning tokens, so supply a number without changing the timing.
+            segments = []
+            for segment in await super().diarize():
+                if isinstance(segment.speaker, int):
+                    segments.append(segment)
+                    continue
+                match = re.fullmatch(r'(?:speaker_?)?([0-9]+)', str(segment.speaker), re.IGNORECASE)
+                number = int(match[1]) if match else -1
+                segments.append(replace(segment, speaker=number))
+            return segments
+
+        def new_session(self):
+            if not self._session_started:
+                self._session_started = True
+                return self
+            # Cleanup closes the audio source. Reuse the loaded models with a
+            # fresh Diart pipeline and observer for the next WebSocket session.
+            return CompatibleDiart(config=self.pipeline.config,
+                                   sample_rate=self.custom_source.sample_rate,
+                                   block_duration=self.custom_source.block_duration)
+
     diart_backend.DiartDiarization = CompatibleDiart
+    wlk_core = importlib.import_module('whisperlivekit.core')
+    wlk_processor = importlib.import_module('whisperlivekit.audio_processor')
+    original_diarization_factory = wlk_core.online_diarization_factory
+    def new_diarization_session(args, backend):
+        if isinstance(backend, CompatibleDiart):
+            return backend.new_session()
+        return original_diarization_factory(args, backend)
+    wlk_core.online_diarization_factory = new_diarization_session
+    wlk_processor.online_diarization_factory = new_diarization_session
 from whisperlivekit.basic_server import main
 main()
 '''

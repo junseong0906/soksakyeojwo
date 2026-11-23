@@ -1,6 +1,8 @@
+import asyncio
 import sys
 import types
 from contextlib import contextmanager
+from dataclasses import dataclass
 from importlib.machinery import ModuleSpec
 
 import pytest
@@ -49,22 +51,56 @@ def test_wlk_core_arguments_reach_legacy_diart_constructor(monkeypatch, custom):
         module = types.ModuleType(name)
         for attribute in attributes: setattr(module, attribute, type(attribute, (), {}))
         monkeypatch.setitem(sys.modules, name, module)
+    @dataclass
+    class Segment:
+        start: float
+        end: float
+        speaker: int | str
+
     class OriginalDiart:
-        def __init__(self, block_duration=1.5, segmentation_model_name='default-seg', embedding_model_name='default-emb'):
+        def __init__(self, sample_rate=16000, config=None, block_duration=1.5,
+                     segmentation_model_name='default-seg', embedding_model_name='default-emb'):
             assert scope['active'], 'Checkpoint metadata must be scoped to the model load'
             alias = LazyModule()
             assert not hasattr(alias, '__file__')
             assert alias.some_member == 'lazy-value'
-            captured.update(block_duration=block_duration, segmentation=segmentation_model_name, embedding=embedding_model_name)
+            if config is None:
+                captured.update(block_duration=block_duration, segmentation=segmentation_model_name,
+                                embedding=embedding_model_name)
+            self.pipeline = types.SimpleNamespace(config=config if config is not None else object())
+            self.custom_source = types.SimpleNamespace(sample_rate=sample_rate, block_duration=block_duration)
+
+        async def diarize(self):
+            return [Segment(0, 1, 'speaker0'), Segment(1, 2, 'speaker_1'), Segment(2, 3, 2), Segment(3, 4, 'unknown')]
+
     backend = types.ModuleType('whisperlivekit.diarization.diart_backend')
     backend.DiartDiarization = OriginalDiart
+    core = types.ModuleType('whisperlivekit.core')
+    core.online_diarization_factory = lambda args, model: model
+    processor = types.ModuleType('whisperlivekit.audio_processor')
+    processor.online_diarization_factory = core.online_diarization_factory
     server = types.ModuleType('whisperlivekit.basic_server')
-    server.main = lambda: backend.DiartDiarization(block_duration=.5,
-        segmentation_model='custom-seg' if custom else None, embedding_model='custom-emb' if custom else None)
+
+    def run_sessions():
+        engine_model = backend.DiartDiarization(block_duration=.5, segmentation_model='custom-seg' if custom else None,
+                                                embedding_model='custom-emb' if custom else None)
+        first = processor.online_diarization_factory(None, engine_model)
+        second = processor.online_diarization_factory(None, engine_model)
+        assert first is not second
+        assert first.custom_source is not second.custom_source
+        assert first.pipeline.config is second.pipeline.config
+        # The backend emits zero-based IDs and WLK's formatter adds one.
+        segments = asyncio.run(second.diarize())
+        assert [segment.speaker + 1 for segment in segments] == [1, 2, 3, 0]
+        assert [(segment.start, segment.end) for segment in segments] == [(0, 1), (1, 2), (2, 3), (3, 4)]
+
+    server.main = run_sessions
     faster = types.ModuleType('faster_whisper')
     faster.WhisperModel = type('WhisperModel', (), {})
     monkeypatch.setitem(sys.modules, 'faster_whisper', faster)
     monkeypatch.setitem(sys.modules, backend.__name__, backend)
+    monkeypatch.setitem(sys.modules, core.__name__, core)
+    monkeypatch.setitem(sys.modules, processor.__name__, processor)
     monkeypatch.setitem(sys.modules, server.__name__, server)
     monkeypatch.setattr(sys, 'argv', ['server', '--diarization'])
     import huggingface_hub

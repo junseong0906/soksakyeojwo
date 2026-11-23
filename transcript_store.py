@@ -29,4 +29,7 @@ class TranscriptStore:
         pending = ' '.join(filter(None, [self.diarization_buffer, self.partial])).strip()
         if pending:
             self.active.append({'text': pending, 'speaker_id': None, 'start_ms': None, 'end_ms': None, 'is_final': True})
+        self.clear_pending()
+
+    def clear_pending(self):
         self.partial = self.diarization_buffer = ''
