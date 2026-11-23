@@ -161,6 +161,8 @@ class MainWindow(QMainWindow):
         self.speaker_labeler = SpeakerLabeler()
         self.current_speaker_label: str = ""
         self.prev_speaker_label: str = ""
+        self.last_committed_raw: str = ""
+        self.last_committed_speaker: str = ""
 
         self._build_ui()
         self._init_shortcuts_and_timers()
@@ -730,20 +732,61 @@ class MainWindow(QMainWindow):
                     self.sub_mode = "대기 중"
                     self.sub_status_label.setText("자막: 연결 오류")
 
+    @staticmethod
+    def _normalize_sentence(text: str) -> str:
+        return text.lstrip("- ").rstrip(".?!, ").strip()
+
+    def _is_same_utterance_continuation(self, prev_raw: str, new_raw: str) -> bool:
+        p = self._normalize_sentence(prev_raw)
+        n = self._normalize_sentence(new_raw)
+        if not p or not n:
+            return False
+        # 앞 문장이 새 문장의 접두사거나(확장), 반대로 살짝 줄어든 동일 발화인 경우
+        return n.startswith(p) or p.startswith(n)
+
+    def _replace_last_history_line(self, formatted_text: str) -> None:
+        now_str = datetime.now().strftime("%H:%M:%S")
+        line = f"[{now_str}] {formatted_text}"
+        if not self.history_entries:
+            self.append_history_line(formatted_text)
+            return
+
+        self.history_entries[-1] = line
+        self.history_browser.setPlainText("\n".join(self.history_entries))
+
+        if self.search_input.text().strip():
+            self._rebuild_search_spans(self.search_input.text().strip(), keep_current=True)
+
+        vbar = self.history_browser.verticalScrollBar()
+        if self.auto_scroll:
+            vbar.setValue(vbar.maximum())
+
     def _apply_incoming_subtitle(
         self, text: str, is_final: bool, speaker_label: str = ""
     ) -> None:
         formatted = f"[{speaker_label}] {text}" if speaker_label else text
 
         if is_final:
-            if (
+            has_valid_current = (
                 self.current_is_final
-                and self.current_text
-                and self.current_text != formatted
+                and bool(self.current_text)
                 and not self.current_text.startswith("WLK 서버로")
-            ):
-                self.prev_text = self.current_text
-                self.append_history_line(self.current_text)
+            )
+
+            if has_valid_current:
+                same_speaker = (self.current_speaker_label == speaker_label)
+                if same_speaker and self._is_same_utterance_continuation(
+                    self.last_committed_raw, text
+                ):
+                    # 같은 문장이 계속 자라나는 중이면 이전 자막 박스/기록에 새 줄을 쌓지 않음
+                    pass
+                else:
+                    # 완전히 새로운 문장이 시작됐을 때만 직전 완성 문장을 이전 자막 박스와 기록에 확정 저장
+                    self.prev_text = self.current_text
+                    self.append_history_line(self.current_text)
+
+            self.last_committed_raw = text
+            self.last_committed_speaker = speaker_label
 
         self.current_text = formatted
         self.current_is_final = is_final
