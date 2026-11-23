@@ -18,6 +18,10 @@ from speaker_labeler import normalize_speaker_id
 logger = logging.getLogger(__name__)
 SOCKET_ERRORS = (OSError, websocket.WebSocketException)
 RECONNECT_DELAY = .6
+SOCKET_POLL_TIMEOUT = 3
+# WLK can wait 30 seconds for room in a processing queue. Give it time to
+# report an overload before the client abandons an unfinished WebSocket frame.
+AUDIO_WRITE_TIMEOUT = 35
 
 def _time_to_ms(value):
     if value is None or value == '': return None
@@ -93,8 +97,28 @@ class WlkMessageProcessor:
 @dataclass(frozen=True)
 class StreamFailure:
     message: str
-    retryable: bool = False
+    recovery: str = ''
     event_type: str = 'asr_error'
+
+
+class AudioSocket(socket.socket):
+    def __init__(self, done, on_backpressure):
+        super().__init__(socket.AF_INET, socket.SOCK_STREAM)
+        self.done = done
+        self.on_backpressure = on_backpressure
+        self.streaming = False
+
+    def send(self, data, flags=0):
+        deadline = time.monotonic() + AUDIO_WRITE_TIMEOUT
+        while True:
+            try:
+                return super().send(data, flags)
+            except TimeoutError:
+                if not self.streaming or self.done.is_set() or time.monotonic() >= deadline:
+                    raise
+                # A timed-out send wrote no bytes in this call. websocket-client
+                # owns the current frame and has already accounted for partial writes.
+                self.on_backpressure()
 
 
 class PcmSession:
@@ -109,17 +133,19 @@ class PcmSession:
         self.processor = WlkMessageProcessor()
         self.done = threading.Event()
         self.draining = threading.Event()
+        self.send_delayed = threading.Event()
         self.failure = None
         self._result_lock = threading.Lock()
 
     def open(self, endpoint: LocalEngineEndpoint, *, reconnecting=False):
         self.ws = self.factory(enable_multithread=True)
-        direct = None
+        direct = AudioSocket(self.done, self._send_waiting)
         try:
-            timeout = 3 if reconnecting else 10
+            timeout = SOCKET_POLL_TIMEOUT if reconnecting else 10
             self.ws.settimeout(timeout)
             # A preconnected socket bypasses proxy discovery in websocket-client.
-            direct = socket.create_connection((LOCAL_HOST, endpoint.port), timeout=timeout)
+            direct.settimeout(timeout)
+            direct.connect((LOCAL_HOST, endpoint.port))
             direct.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self.ws.connect(endpoint.asr_url, socket=direct, header=endpoint.headers, redirect_limit=0)
             if self.ws.getstatus() != 101:
@@ -134,10 +160,10 @@ class PcmSession:
                 raise RuntimeError('로컬 엔진이 PCM 입력을 지원하지 않습니다. 설정에서 모델을 다시 적용해 주세요.')
         except Exception:
             self.disconnect()
-            if direct is not None:
-                direct.close()
+            direct.close()
             raise
-        self.ws.settimeout(3)
+        self.ws.settimeout(SOCKET_POLL_TIMEOUT)
+        direct.streaming = True
         logger.info('Subtitle stream %s', 'reconnected' if reconnecting else 'opened')
         self.events.put({'type': 'stream_reopened' if reconnecting else 'stream_opened'})
         self.receiver = threading.Thread(target=self._receive, args=(self.ws,), daemon=True)
@@ -166,8 +192,9 @@ class PcmSession:
                     code = int.from_bytes(raw[:2], 'big') if len(raw) >= 2 else None
                     reason = raw[2:].decode('utf-8', errors='replace')
                     details = f'{code} {reason}'.strip() if code else '종료 코드 없음'
+                    recovery = 'reconnect' if code in (None, 1000, 1001, 1006, 1011, 1012, 1013) else ''
                     self._finish(StreamFailure(f'자막 서버 연결이 일찍 종료되었습니다. ({details})',
-                                               retryable=code in (None, 1000, 1001, 1006, 1011, 1012, 1013)))
+                                               recovery=recovery))
                     return
                 if self.done.is_set():
                     return
@@ -178,14 +205,16 @@ class PcmSession:
                         if self.draining.is_set():
                             self._finish()
                         else:
-                            self._finish(StreamFailure('로컬 엔진이 자막 처리를 일찍 끝냈습니다.', retryable=True))
+                            self._finish(StreamFailure('로컬 엔진이 자막 처리를 일찍 끝냈습니다.', recovery='reconnect'))
                         return
                     if event['type'] == 'asr_error':
-                        self._finish(StreamFailure(event['message']))
+                        message = event['message']
+                        recover = message.startswith(('Transcription backlog did not clear', 'Diarization backlog did not clear'))
+                        self._finish(StreamFailure(message, recovery='restart' if recover else ''))
                         return
                     self.events.put(event)
         except SOCKET_ERRORS as exc:
-            self._finish(StreamFailure(f'자막 수신 연결이 끊겼습니다. ({exc})', retryable=True))
+            self._finish(StreamFailure(f'자막 수신 연결이 끊겼습니다. ({exc})', recovery='reconnect'))
         except Exception as exc:
             self._finish(StreamFailure(f'자막 수신 처리 오류: {exc}'))
 
@@ -193,13 +222,29 @@ class PcmSession:
         if pcm:
             self._send(pcm)
 
+    def _send_waiting(self):
+        if self.send_delayed.is_set():
+            return
+        self.send_delayed.set()
+        logger.warning('Local engine is slow to receive PCM. Waiting on the same connection.')
+        if not self.draining.is_set():
+            self.events.put({'type': 'stream_delayed'})
+
     def _send(self, payload):
         if self.ws is None or self.done.is_set() or not self.ws.connected:
             return
         try:
             self.ws.send_binary(payload)
+        except (TimeoutError, websocket.WebSocketTimeoutException) as exc:
+            self._finish(StreamFailure(f'로컬 엔진이 음성을 받지 못해 전송 시간이 초과됐습니다. ({exc})', recovery='restart'))
         except SOCKET_ERRORS as exc:
-            self._finish(StreamFailure(f'자막 음성 전송 연결이 끊겼습니다. ({exc})', retryable=True))
+            self._finish(StreamFailure(f'자막 음성 전송 연결이 끊겼습니다. ({exc})', recovery='reconnect'))
+        else:
+            if self.send_delayed.is_set():
+                self.send_delayed.clear()
+                logger.info('PCM delivery resumed on the same connection.')
+                if not self.draining.is_set():
+                    self.events.put({'type': 'stream_delivery_resumed'})
 
     def close(self, timeout=45):
         if self.ws is None:
@@ -233,7 +278,7 @@ class PcmSession:
         self.disconnect()
         if self.failure:
             self.events.put({'type': self.failure.event_type, 'message': redact(self.failure.message)})
-        self.events.put({'type': 'stream_closed', 'retryable': bool(allow_recovery and self.failure and self.failure.retryable)})
+        self.events.put({'type': 'stream_closed', 'retryable': bool(allow_recovery and self.failure and self.failure.recovery)})
 
 
 def _open_session(events, endpoint, reconnecting=False):
@@ -314,7 +359,7 @@ def _run_client(cmd_queue, event_queue):
                 continue
 
             if session and session.done.is_set():
-                if session.failure and session.failure.retryable and can_retry:
+                if session.failure and session.failure.recovery == 'reconnect' and can_retry:
                     can_retry = False
                     session.disconnect()
                     session = None

@@ -321,6 +321,29 @@ def test_local_engine_restarts_once_and_retains_last_confirmed_caption(window, m
     assert window.sub_mode == '중단(녹음 유지)'
 
 
+def test_user_pause_stays_paused_after_a_live_send_times_out(window, monkeypatch):
+    window.rec_cmd_queue = queue.Queue()
+    window.rec_event_queue = queue.Queue()
+    window.asr_event_queue = queue.Queue()
+    window.is_live_asr_active = True
+    window.controller.server.config = object()
+
+    def unexpected_restart():
+        pytest.fail('engine restarted after the user paused captions')
+
+    monkeypatch.setattr(window.controller, 'restart', unexpected_restart)
+    window.asr_event_queue.put({'type': 'stream_delayed'})
+    window._poll_worker_events()
+    assert window.sub_mode == '전송 지연'
+    window.toggle_live_asr()
+    assert window.rec_cmd_queue.get_nowait() == {'type': 'stop_asr'}
+    window.asr_event_queue.put({'type': 'asr_error', 'message': '음성 전송 시간 초과'})
+    window.asr_event_queue.put({'type': 'stream_closed', 'retryable': True})
+    window._poll_worker_events()
+    assert not window.is_live_asr_active
+    assert not window.stream_busy
+
+
 def test_speaker_name_button_saves_and_updates_existing_subtitles(window, monkeypatch):
     from PySide6.QtWidgets import QPushButton
     from ui.main_window import SpeakerLabelDialog

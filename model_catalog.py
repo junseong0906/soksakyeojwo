@@ -15,7 +15,10 @@ class ModelSpec:
     description: str
     def arguments(self, path: Path, diarization: bool = False, device: str = 'auto') -> list[str]:
         args = ['--backend', self.backend, '--language', 'ko', '--model-path', str(path), '--pcm-input']
-        if self.family == 'whisper': args += ['--backend-policy', 'localagreement']
+        if self.family == 'whisper':
+            # LocalAgreement repeatedly decodes overlapping audio. A modest
+            # batch interval leaves GPU time for transcription and Diart.
+            args += ['--backend-policy', 'localagreement', '--asr-coalesce-min-s', '0.5']
         if self.family == 'qwen':
             # Windowed mode supports Korean; the causal checkpoint is English-only.
             args += ['--qwen3-streaming-audio-backend', 'windowed', '--qwen3-streaming-device', device]

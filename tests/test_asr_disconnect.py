@@ -1,5 +1,6 @@
 import json
 import queue
+import socket
 import threading
 
 import pytest
@@ -7,7 +8,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.sync.server import serve
 
 from local_engine import LocalEngineEndpoint
-from workers.asr_client_worker import PcmSession, _run_client
+from workers.asr_client_worker import AudioSocket, PcmSession, _run_client
 
 
 def send_config(socket):
@@ -108,3 +109,79 @@ def test_worker_rejects_external_address_before_opening_a_socket(monkeypatch):
         assert events.get_nowait()['type'] == 'asr_error'
         assert events.get_nowait() == {'type': 'stream_closed', 'retryable': False}
     assert events.empty()
+
+
+def test_pcm_write_timeout_after_partial_send_keeps_the_connection(monkeypatch):
+    received = []
+    attempts = []
+    winsock_send = socket.socket.send
+
+    def write_with_temporary_backpressure(sock, data, flags=0):
+        if isinstance(sock, AudioSocket) and sock.streaming and len(attempts) < 2:
+            attempts.append(bytes(data))
+            if len(attempts) == 1:
+                return winsock_send(sock, data[:4], flags)
+            raise TimeoutError('timed out while waiting for the local engine to read')
+        return winsock_send(sock, data, flags)
+
+    def handle(peer):
+        send_config(peer)
+        received.extend((peer.recv(timeout=4), peer.recv(timeout=4)))
+        peer.send(json.dumps({'type': 'ready_to_stop'}))
+
+    monkeypatch.setattr(socket.socket, 'send', write_with_temporary_backpressure)
+    pcm = bytes(range(64))
+    with serve(handle, '127.0.0.1', 0) as server:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        endpoint = LocalEngineEndpoint(server.socket.getsockname()[1], 'test-engine-key')
+        events = queue.Queue()
+        session = PcmSession(events)
+        session.open(endpoint)
+        session.send(pcm)
+        session.close(timeout=4)
+        server.shutdown()
+
+    assert attempts[1] == attempts[0][4:]
+    assert received == [pcm, b'']
+    assert [event['type'] for event in events.queue] == [
+        'stream_opened', 'stream_delayed', 'stream_delivery_resumed',
+        'stream_draining', 'transcript_finalized', 'stream_closed',
+    ]
+
+
+def test_persistent_backpressure_requests_engine_restart_without_reopening(monkeypatch):
+    connections = []
+    winsock_send = socket.socket.send
+
+    def write_while_engine_stalled(sock, data, flags=0):
+        if isinstance(sock, AudioSocket) and sock.streaming:
+            raise TimeoutError('timed out')
+        return winsock_send(sock, data, flags)
+
+    def handle(peer):
+        connections.append(peer)
+        send_config(peer)
+        with pytest.raises(ConnectionClosed):
+            peer.recv(timeout=4)
+
+    monkeypatch.setattr(socket.socket, 'send', write_while_engine_stalled)
+    monkeypatch.setattr('workers.asr_client_worker.AUDIO_WRITE_TIMEOUT', 0)
+    with serve(handle, '127.0.0.1', 0) as server:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        endpoint = LocalEngineEndpoint(server.socket.getsockname()[1], 'test-engine-key')
+        commands, events = queue.Queue(), queue.Queue()
+        client = threading.Thread(target=_run_client, args=(commands, events), daemon=True)
+        client.start()
+        try:
+            commands.put({'type': 'start_stream', 'endpoint': endpoint})
+            assert events.get(timeout=5)['type'] == 'stream_opened'
+            commands.put({'type': 'audio_chunk', 'pcm_bytes': b'pcm'})
+            assert events.get(timeout=5)['type'] == 'asr_error'
+            assert events.get(timeout=5) == {'type': 'stream_closed', 'retryable': True}
+        finally:
+            commands.put({'type': 'shutdown'})
+            client.join(timeout=5)
+            server.shutdown()
+
+    assert len(connections) == 1
+    assert not client.is_alive()

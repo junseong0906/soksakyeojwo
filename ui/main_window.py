@@ -721,7 +721,18 @@ class MainWindow(QMainWindow):
                     self.sub_status_label.setText("자막: 연결을 복구하는 중…")
                     self._discard_pending_caption()
 
+            elif etype == 'stream_delayed':
+                if self.is_live_asr_active and not self.stream_busy and not self.closing:
+                    self.sub_mode = '전송 지연'
+                    self.sub_status_label.setText('자막: 로컬 엔진 처리 지연 · 연결 유지 중')
+
+            elif etype == 'stream_delivery_resumed':
+                if self.sub_mode == '전송 지연' and not self.stream_busy and not self.closing:
+                    self.sub_mode = '수신 중'
+                    self.sub_status_label.setText('자막: 실시간 수신 중')
+
             elif etype == "stream_closed":
+                pausing = self.is_live_asr_active and self.stream_busy
                 self.is_live_asr_active = False
                 self.stream_busy = False
                 if not self.closing:
@@ -740,7 +751,7 @@ class MainWindow(QMainWindow):
                     self.pending_model = None
                     self.stream_busy = True
                     self.controller.apply(*request)
-                elif (ev.get('retryable') and not self.engine_restart_attempted
+                elif (ev.get('retryable') and not pausing and not self.engine_restart_attempted
                       and self.controller.server.config is not None and not self.closing):
                     self._schedule_engine_restart()
 
@@ -777,8 +788,9 @@ class MainWindow(QMainWindow):
         if is_final:
             self.event_captions = (self.event_captions + parts)[-2:]
             self.append_history_line(prefix + text)
-        self.sub_mode = '수신 중'
-        self.sub_status_label.setText('자막: 실시간 수신 중')
+        if self.sub_mode != '전송 지연':
+            self.sub_mode = '수신 중'
+            self.sub_status_label.setText('자막: 실시간 수신 중')
         pending = parts[-1] if parts and not is_final else ''
         self._show_caption_display(self.event_captions, pending)
 
@@ -823,8 +835,11 @@ class MainWindow(QMainWindow):
             stamp = f'{position // 60000:02d}:{position // 1000 % 60:02d}' if position is not None else '--:--'
             rendered.append(f'[{stamp}] ' + self._format_line(line))
         self._update_snapshot_history(self.session_history + rendered)
-        self.sub_mode = '수신 중'
-        self.sub_status_label.setText('자막: 실시간 수신 중' if not self.stream_busy else '자막: 마지막 음성을 처리하는 중…')
+        if self.stream_busy:
+            self.sub_status_label.setText('자막: 마지막 음성을 처리하는 중…')
+        elif self.sub_mode != '전송 지연':
+            self.sub_mode = '수신 중'
+            self.sub_status_label.setText('자막: 실시간 수신 중')
         self._show_caption_display(self._recent_confirmed_captions(), pending_parts[-1] if pending_parts else '')
 
     def _update_snapshot_history(self, entries):

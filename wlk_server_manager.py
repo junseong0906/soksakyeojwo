@@ -8,6 +8,7 @@ import subprocess
 import time
 import urllib.request
 from app_paths import data_dir
+from app_version import APP_VERSION
 from local_engine import HEALTH_PATH, LOCAL_HOST, LocalEngineEndpoint
 from model_service import check_cancel, hidden_flags
 from external_process import external_popen
@@ -216,6 +217,8 @@ class WlkServerManager:
         if path.exists() and path.stat().st_size > 5_000_000:
             path.replace(logs / 'wlk_server.previous.log')
         self.log = path.open('ab', buffering=0)
+        started_at = time.strftime('%Y-%m-%d %H:%M:%S')
+        self.log.write(f'\n{started_at} app={APP_VERSION} model={model.id} device={device} diarization={diarization}\n'.encode())
         command = [str(python), '-c', SERVER_BOOTSTRAP,
                    '--host', LOCAL_HOST, '--port', str(endpoint.port),
                    '--session-idle-timeout', '0',
