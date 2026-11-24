@@ -22,7 +22,7 @@ def _is_port_open(host: str, port: int, timeout: float = 0.25) -> bool:
 
 
 def _resolve_wlk_command(
-    model: str = "tiny",
+    model: str = "large-v3-turbo",
     backend: str = "faster-whisper",
     language: str = "ko",
     host: str = "127.0.0.1",
@@ -77,7 +77,7 @@ class WlkServerManager:
 
     def __init__(
         self,
-        model: str = "tiny",
+        model: str = "large-v3-turbo",
         backend: str = "faster-whisper",
         language: str = "ko",
         host: str = "127.0.0.1",

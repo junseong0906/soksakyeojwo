@@ -1,5 +1,4 @@
 터미널 명령어(VSC에서 작업했음)
-웹임
 
 <설치>
 python --version
@@ -12,11 +11,13 @@ python -m venv .venv (가상환경 만들기)
     성공했으면 터미널 앞에 (.venv)가 나타남)
 python -m pip install --upgrade pip (최신으로 업뎃)
 python -m pip install whisperlivekit (좀 오래걸림)
+python -m pip install PySide6
+python -m pip install websocket-client
 wlk --help (설치 확인)
 
 <실행> 
 wlk --model tiny --backend faster-whisper --lan ko --host 127.0.0.1 --port 8000 (모델 사용 및 서버 실행)
-(브라우저에 http://127.0.0.1:8000/ 입력해서 접속)
+(브라우저에 http://127.0.0.1:8000/ 입력해서 접속 가능)
 (Ctrl+C를 터미널에 입력하면 서버 종료)
 
 <가상환경 종료>

@@ -13,7 +13,7 @@ def main() -> None:
     app.setFont(QFont("Malgun Gothic", 10))
 
     server_manager = WlkServerManager(
-        model="tiny",
+        model="large-v3-turbo",
         backend="faster-whisper",
         language="ko",
         host="127.0.0.1",
